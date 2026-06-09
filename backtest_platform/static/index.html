@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>底层资产回测平台</title>
+    <link rel="stylesheet" href="/styles.css?v=20260608-5" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Plinger Strategy Lab</p>
+        <h1>底层资产回测平台</h1>
+      </div>
+      <div class="top-actions">
+        <div class="control-group" aria-label="MA20 风控设置">
+          <span class="control-title">MA20 风控</span>
+          <label class="check-pill">
+            <input id="ma20Equity" type="checkbox" checked />
+            <span>股票优势</span>
+          </label>
+          <label class="check-pill">
+            <input id="ma20Commodity" type="checkbox" checked />
+            <span>商品优势</span>
+          </label>
+          <label class="check-pill">
+            <input id="ma20Convertible" type="checkbox" />
+            <span>转债优势</span>
+          </label>
+        </div>
+        <button id="clearBtn" class="ghost-btn danger-btn" type="button">清空篮子</button>
+        <button id="resetBtn" class="ghost-btn" type="button">恢复默认</button>
+        <button id="runBtn" class="primary-btn" type="button">运行回测</button>
+      </div>
+    </header>
+
+    <main class="shell">
+      <aside class="library-panel">
+        <div class="panel-head">
+          <div>
+            <h2>资产库</h2>
+            <p id="assetCount">正在加载资产...</p>
+          </div>
+        </div>
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="fund" type="button">基金</button>
+          <button class="tab" data-tab="index" type="button">指数</button>
+          <button class="tab" data-tab="enhanced" type="button">增强</button>
+        </div>
+        <input id="searchInput" class="search" type="search" placeholder="搜索代码或名称" />
+        <div id="assetList" class="asset-list"></div>
+      </aside>
+
+      <section class="workspace">
+        <section class="basket-grid" aria-label="回测资产篮子">
+          <div class="basket" data-basket="equity">
+            <div class="basket-head">
+              <h2>股票</h2>
+              <span class="badge red">等权</span>
+            </div>
+            <div class="dropzone" data-basket="equity"></div>
+          </div>
+          <div class="basket" data-basket="commodity">
+            <div class="basket-head">
+              <h2>商品</h2>
+              <span class="badge gold">等权</span>
+            </div>
+            <div class="dropzone" data-basket="commodity"></div>
+          </div>
+          <div class="basket" data-basket="convertible">
+            <div class="basket-head">
+              <h2>可转债</h2>
+              <span class="badge violet">等权</span>
+            </div>
+            <div class="dropzone" data-basket="convertible"></div>
+          </div>
+          <div class="basket" data-basket="pure_bond">
+            <div class="basket-head">
+              <h2>纯债</h2>
+              <span class="badge blue">水库</span>
+            </div>
+            <div class="dropzone" data-basket="pure_bond"></div>
+          </div>
+        </section>
+
+        <section class="splice-panel" id="splicePanel">
+          <div class="splice-head">
+            <label class="toggle">
+              <input id="spliceToggle" type="checkbox" />
+              <span></span>
+              开启模拟拼接
+            </label>
+            <p>开启后，基金共同首日前全部使用下方指数池；基金共同首日起全部切回上方基金篮子。</p>
+          </div>
+          <div class="splice-pool hidden" id="splicePool">
+            <div class="splice-basket" data-splice-basket="equity">
+              <div class="splice-title"><h3>股票指数</h3><span>前段</span></div>
+              <div class="splice-dropzone" data-splice-basket="equity"></div>
+            </div>
+            <div class="splice-basket" data-splice-basket="commodity">
+              <div class="splice-title"><h3>商品指数</h3><span>前段</span></div>
+              <div class="splice-dropzone" data-splice-basket="commodity"></div>
+            </div>
+            <div class="splice-basket" data-splice-basket="convertible">
+              <div class="splice-title"><h3>可转债指数</h3><span>前段</span></div>
+              <div class="splice-dropzone" data-splice-basket="convertible"></div>
+            </div>
+            <div class="splice-basket" data-splice-basket="pure_bond">
+              <div class="splice-title"><h3>纯债指数</h3><span>前段</span></div>
+              <div class="splice-dropzone" data-splice-basket="pure_bond"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="status" class="status">拖动左侧标的到四类资产篮子后运行回测。</section>
+
+        <section id="results" class="results hidden">
+          <div class="result-head">
+            <div>
+              <h2>回测结果</h2>
+              <p id="windowText"></p>
+            </div>
+          </div>
+
+          <div id="metrics" class="metrics"></div>
+
+          <div class="chart-grid">
+            <article class="chart-card wide">
+              <div class="chart-title">
+                <h3>净值曲线</h3>
+                <span>策略 / 理论无风控 / 沪深300</span>
+              </div>
+              <canvas id="navChart" height="280"></canvas>
+            </article>
+            <article class="chart-card">
+              <div class="chart-title">
+                <h3>回撤水下图</h3>
+                <span>每日距离历史高点</span>
+              </div>
+              <canvas id="drawdownChart" height="250"></canvas>
+            </article>
+            <article class="chart-card">
+              <div class="chart-title">
+                <h3>仓位分布</h3>
+                <span>MA20 后真实持仓</span>
+              </div>
+              <canvas id="weightChart" height="250"></canvas>
+            </article>
+            <article class="chart-card wide">
+              <div class="chart-title">
+                <h3>年度收益大比拼</h3>
+                <span>策略 vs 沪深300</span>
+              </div>
+              <canvas id="annualReturnChart" height="270"></canvas>
+            </article>
+            <article class="chart-card wide">
+              <div class="chart-title">
+                <h3>年度贡献拆解</h3>
+                <span>四类资产驱动力 vs 沪深300</span>
+              </div>
+              <canvas id="annualContributionChart" height="270"></canvas>
+            </article>
+            <article class="chart-card wide">
+              <div class="chart-title">
+                <h3>累计绝对拉动点数</h3>
+                <span>四大核心资产已分配复利堆叠</span>
+              </div>
+              <canvas id="contributionChart" height="280"></canvas>
+            </article>
+          </div>
+
+          <div class="table-grid">
+            <article class="table-card">
+              <h3>年度归因</h3>
+              <div id="annualTable" class="table-wrap"></div>
+            </article>
+            <article class="table-card">
+              <h3>资金效率</h3>
+              <div id="efficiencyTable" class="table-wrap"></div>
+            </article>
+            <article class="table-card wide">
+              <h3>最近调仓日志</h3>
+              <div id="tradeTable" class="table-wrap"></div>
+            </article>
+            <article class="table-card wide">
+              <h3>MA20 逃逸诊断</h3>
+              <div id="escapeTable" class="table-wrap"></div>
+            </article>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js?v=20260608-5"></script>
+  </body>
+</html>

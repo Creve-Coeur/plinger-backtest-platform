@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>底层资产回测平台</title>
-    <link rel="stylesheet" href="/styles.css?v=20260608-5" />
+    <link rel="stylesheet" href="/styles.css?v=20260609-3" />
   </head>
   <body>
     <header class="topbar">
@@ -26,6 +26,10 @@
           <label class="check-pill">
             <input id="ma20Convertible" type="checkbox" />
             <span>转债优势</span>
+          </label>
+          <label class="check-pill confirm-pill" title="连续3个交易日低于或站上MA20后，下一交易日执行">
+            <input id="ma20ThreeDay" type="checkbox" />
+            <span>3日MA20</span>
           </label>
         </div>
         <button id="clearBtn" class="ghost-btn danger-btn" type="button">清空篮子</button>
@@ -132,14 +136,14 @@
               </div>
               <canvas id="navChart" height="280"></canvas>
             </article>
-            <article class="chart-card">
+            <article class="chart-card wide">
               <div class="chart-title">
                 <h3>回撤水下图</h3>
                 <span>每日距离历史高点</span>
               </div>
               <canvas id="drawdownChart" height="250"></canvas>
             </article>
-            <article class="chart-card">
+            <article class="chart-card wide">
               <div class="chart-title">
                 <h3>仓位分布</h3>
                 <span>MA20 后真实持仓</span>
@@ -191,6 +195,6 @@
       </section>
     </main>
 
-    <script src="/app.js?v=20260608-5"></script>
+    <script src="/app.js?v=20260609-3"></script>
   </body>
 </html>

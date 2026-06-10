@@ -11,6 +11,15 @@ const moduleLabels = {
   enhanced: "增强",
 };
 
+const rebalanceTypeLabels = {
+  initial: "初始建仓",
+  stage_change: "Stage变化",
+  three_month: "三个月再平衡",
+  ma20_exit: "MA20退出",
+  ma20_reentry: "MA20恢复",
+  splice_switch: "拼接切换",
+};
+
 const colors = {
   strategy: "#c94a4a",
   theory: "#7a8795",
@@ -52,6 +61,7 @@ const els = {
   ma20Equity: document.getElementById("ma20Equity"),
   ma20Commodity: document.getElementById("ma20Commodity"),
   ma20Convertible: document.getElementById("ma20Convertible"),
+  ma20ThreeDay: document.getElementById("ma20ThreeDay"),
   spliceToggle: document.getElementById("spliceToggle"),
   splicePool: document.getElementById("splicePool"),
   splicePanel: document.getElementById("splicePanel"),
@@ -79,7 +89,7 @@ async function init() {
     resetDefaults();
     renderAssets();
     setStatus(
-      `已加载 ${state.assetsById.size} 个资产；普林格信号 ${data.pring?.start || "-"} 至 ${data.pring?.end || "-"}。`,
+      `已加载 ${state.assetsById.size} 个资产；月度普林格信号 ${data.pring?.start || "-"} 至 ${data.pring?.end || "-"}，共 ${data.pring?.rows || 0} 条；数据源：${data.pring?.source || "-"}。`,
       "ok",
     );
   } catch (err) {
@@ -306,6 +316,7 @@ async function runBacktest() {
         commodity: els.ma20Commodity.checked,
         convertible: els.ma20Convertible.checked,
       },
+      ma20ThreeDay: els.ma20ThreeDay.checked,
     };
     const res = await fetch("/api/backtest", {
       method: "POST",
@@ -333,7 +344,10 @@ function renderResult(data) {
   const spliceText = data.spliceContext?.enabled
     ? `；模拟拼接：${data.spliceContext.indexStart} 至 ${data.spliceContext.indexEnd} 用指数，${data.spliceContext.fundStart} 起用基金`
     : "";
-  els.windowText.textContent = `${data.window.start} 至 ${data.window.end}，共 ${data.window.days} 个交易日；MA20 风控：${activeControls || "关闭"}${spliceText}。`;
+  const ma20Mode = data.ma20ThreeDay ? "连续3日确认" : "单日确认";
+  const stats = data.rebalanceStats || {};
+  const rebalanceText = `策略调仓 ${stats.strategyTotal ?? 0} 次（Stage变化 ${stats.stageChanges ?? 0} 次，三个月再平衡 ${stats.threeMonth ?? 0} 次；不含初始建仓和MA20）`;
+  els.windowText.textContent = `${data.window.start} 至 ${data.window.end}，共 ${data.window.days} 个交易日；${rebalanceText}；MA20 风控：${activeControls || "关闭"}${activeControls ? `（${ma20Mode}）` : ""}${spliceText}。`;
   renderMetrics(data.metrics);
   renderCharts(data);
   renderTables(data);
@@ -444,11 +458,12 @@ function renderTables(data) {
   );
 
   els.tradeTable.innerHTML = table(
-    ["开始", "结束", "天数", "逻辑", "股票", "商品", "转债", "纯债"],
+    ["日期", "类型", "Stage", "优势资产", "逻辑", "股票", "商品", "转债", "纯债"],
     data.tradeLogs.slice(-20).reverse().map((row) => [
       row.start,
-      row.end,
-      row.days,
+      rebalanceTypeLabels[row.rebalanceType] || row.rebalanceType || "-",
+      Number.isFinite(row.stage) ? `Stage ${row.stage}` : "-",
+      basketLabels[row.dominantAsset] || row.dominantAsset || "-",
       row.reason,
       pct(row.equityWeight),
       pct(row.commodityWeight),
@@ -496,7 +511,7 @@ function table(headers, rows) {
 function drawLineChart(canvasId, rows, series, options = {}) {
   const canvas = document.getElementById(canvasId);
   const { ctx, width, height } = prepareCanvas(canvas);
-  const pad = { left: 54, right: 18, top: 24, bottom: 46 };
+  const pad = { left: 54, right: 18, top: 24, bottom: 68 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const values = [];
@@ -544,7 +559,7 @@ function drawLineChart(canvasId, rows, series, options = {}) {
 function drawStackedArea(canvasId, rows, series) {
   const canvas = document.getElementById(canvasId);
   const { ctx, width, height } = prepareCanvas(canvas);
-  const pad = { left: 48, right: 16, top: 24, bottom: 46 };
+  const pad = { left: 48, right: 16, top: 24, bottom: 68 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
 
@@ -576,7 +591,7 @@ function drawStackedArea(canvasId, rows, series) {
 function drawSignedStackedArea(canvasId, rows, series, options = {}) {
   const canvas = document.getElementById(canvasId);
   const { ctx, width, height } = prepareCanvas(canvas);
-  const pad = { left: 54, right: 18, top: 24, bottom: 46 };
+  const pad = { left: 54, right: 18, top: 24, bottom: 68 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const posTotals = rows.map((row) => series.reduce((sum, s) => sum + Math.max(0, Number(row[s.key]) || 0), 0));
@@ -780,10 +795,9 @@ function drawAxes(ctx, width, height, pad, minY, maxY, percentAxis) {
 function drawTimeAxis(ctx, rows, width, height, pad) {
   if (!rows.length) return;
   const plotW = width - pad.left - pad.right;
-  const ticks = buildQuarterTicks(rows, Math.max(4, Math.floor(plotW / 92)));
+  const ticks = buildQuarterTicks(rows);
   ctx.fillStyle = "#657282";
   ctx.strokeStyle = "#c5ced8";
-  ctx.textBaseline = "top";
   ticks.forEach((tick) => {
     const x = pad.left + (rows.length <= 1 ? 0 : (tick.index / (rows.length - 1)) * plotW);
     const axisY = height - pad.bottom;
@@ -791,10 +805,13 @@ function drawTimeAxis(ctx, rows, width, height, pad) {
     ctx.moveTo(x, axisY);
     ctx.lineTo(x, axisY + 5);
     ctx.stroke();
-    if (x > width - pad.right - 28) ctx.textAlign = "right";
-    else if (x < pad.left + 28) ctx.textAlign = "left";
-    else ctx.textAlign = "center";
-    ctx.fillText(tick.label, x, axisY + 9);
+    ctx.save();
+    ctx.translate(x + 4, axisY + 9);
+    ctx.rotate(Math.PI / 2);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(tick.label, 0, 0);
+    ctx.restore();
   });
 }
 
@@ -810,7 +827,7 @@ function drawCategoryAxis(ctx, labels, width, height, pad) {
   });
 }
 
-function buildQuarterTicks(rows, maxTicks) {
+function buildQuarterTicks(rows) {
   const candidates = [];
   let lastQuarter = "";
   rows.forEach((row, index) => {
@@ -837,12 +854,7 @@ function buildQuarterTicks(rows, maxTicks) {
       candidates.push({ index: lastRowIndex, label: lastLabel });
     }
   }
-  if (candidates.length <= maxTicks) return candidates;
-  const step = Math.ceil((candidates.length - 1) / (maxTicks - 1));
-  const sampled = candidates.filter((_, i) => i % step === 0);
-  const finalTick = candidates[candidates.length - 1];
-  if (sampled[sampled.length - 1].index !== finalTick.index) sampled.push(finalTick);
-  return sampled;
+  return candidates;
 }
 
 function drawLegend(ctx, series, x, y) {

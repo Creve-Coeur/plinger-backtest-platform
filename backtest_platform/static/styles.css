@@ -122,6 +122,12 @@ h3 {
   color: #276548;
 }
 
+.confirm-pill input:checked + span {
+  background: #edf1f7;
+  border-color: #9bacc2;
+  color: #324d6b;
+}
+
 .primary-btn,
 .ghost-btn {
   min-height: 40px;

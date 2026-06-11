@@ -4,10 +4,15 @@ from __future__ import annotations
 import json
 import math
 import mimetypes
+import os
 import sys
+import threading
 import traceback
+import uuid
 import warnings
+from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -22,6 +27,8 @@ warnings.filterwarnings("ignore", message="Workbook contains no default style.*"
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
 STATIC_DIR = APP_DIR / "static"
+DATA_DIR = APP_DIR / "data"
+STRATEGY_STORE_FILE = DATA_DIR / "saved_strategies.json"
 
 FUND_DIR = ROOT_DIR / "基金"
 FUND_MANAGER_DIR = FUND_DIR / "基金经理"
@@ -1881,6 +1888,655 @@ def build_efficiency(weights_history: dict[str, list[float]], contribution: dict
     return rows
 
 
+class ApiError(ValueError):
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+class StrategyStore:
+    SCHEMA_VERSION = 1
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.RLock()
+
+    def _empty(self) -> dict[str, Any]:
+        return {"schemaVersion": self.SCHEMA_VERSION, "strategies": [], "tags": []}
+
+    def _read_unlocked(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return self._empty()
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ApiError(
+                f"策略数据文件无法读取，已停止写入以保护原文件：{exc}",
+                status=500,
+            ) from exc
+        if (
+            not isinstance(data, dict)
+            or data.get("schemaVersion") != self.SCHEMA_VERSION
+            or not isinstance(data.get("strategies"), list)
+            or not isinstance(data.get("tags"), list)
+        ):
+            raise ApiError("策略数据文件格式或版本无效，已停止写入", status=500)
+        return data
+
+    def _write_unlocked(self, data: dict[str, Any]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temp_path, self.path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+    def _tag_map(self, data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {tag["id"]: tag for tag in data["tags"]}
+
+    def _strategy_map(self, data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {strategy["id"]: strategy for strategy in data["strategies"]}
+
+    def _tag_depth(
+        self,
+        tag_id: str,
+        tags: dict[str, dict[str, Any]],
+        seen: set[str] | None = None,
+    ) -> int:
+        seen = set() if seen is None else seen
+        if tag_id in seen:
+            raise ApiError("标签树存在循环引用")
+        seen.add(tag_id)
+        tag = tags.get(tag_id)
+        if tag is None:
+            raise ApiError("标签不存在", status=404)
+        parent_id = tag.get("parentId")
+        return 1 if not parent_id else 1 + self._tag_depth(parent_id, tags, seen)
+
+    def _tag_path(
+        self,
+        tag_id: str,
+        tags: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        path: list[dict[str, Any]] = []
+        current_id: str | None = tag_id
+        seen: set[str] = set()
+        while current_id:
+            if current_id in seen:
+                raise ApiError("标签树存在循环引用")
+            seen.add(current_id)
+            tag = tags.get(current_id)
+            if tag is None:
+                break
+            path.append(tag)
+            current_id = tag.get("parentId")
+        return list(reversed(path))
+
+    def _descendants(
+        self,
+        tag_id: str,
+        tags: dict[str, dict[str, Any]],
+    ) -> set[str]:
+        found = {tag_id}
+        changed = True
+        while changed:
+            changed = False
+            for candidate in tags.values():
+                if candidate.get("parentId") in found and candidate["id"] not in found:
+                    found.add(candidate["id"])
+                    changed = True
+        return found
+
+    def _validate_sibling_name(
+        self,
+        name: str,
+        parent_id: str | None,
+        tags: dict[str, dict[str, Any]],
+        exclude_id: str | None = None,
+    ) -> None:
+        folded = name.casefold()
+        for tag in tags.values():
+            if (
+                tag["id"] != exclude_id
+                and tag.get("parentId") == parent_id
+                and str(tag.get("name", "")).casefold() == folded
+            ):
+                raise ApiError("同一级标签名称不可重复", status=409)
+
+    def _validate_strategy_name(
+        self,
+        name: Any,
+        strategies: list[dict[str, Any]],
+        exclude_id: str | None = None,
+    ) -> str:
+        clean = str(name or "").strip()
+        if not clean:
+            raise ApiError("请输入策略名")
+        if len(clean) > 120:
+            raise ApiError("策略名不能超过 120 个字符")
+        folded = clean.casefold()
+        if any(
+            item["id"] != exclude_id
+            and str(item.get("name", "")).casefold() == folded
+            for item in strategies
+        ):
+            raise ApiError("策略名已存在", status=409)
+        return clean
+
+    def _normalize_notes(self, value: Any) -> str:
+        notes = str(value or "").strip()
+        if len(notes) > 2000:
+            raise ApiError("备注不能超过 2000 个字符")
+        return notes
+
+    def _normalize_tag_ids(
+        self,
+        tag_ids: Any,
+        tags: dict[str, dict[str, Any]],
+        require_active: bool,
+        allowed_inactive_ids: set[str] | None = None,
+    ) -> list[str]:
+        if not isinstance(tag_ids, list):
+            raise ApiError("标签必须为数组")
+        unique: list[str] = []
+        for raw_id in tag_ids:
+            tag_id = str(raw_id)
+            tag = tags.get(tag_id)
+            if tag is None:
+                raise ApiError(f"标签不存在：{tag_id}")
+            if (
+                require_active
+                and not tag.get("active", True)
+                and tag_id not in (allowed_inactive_ids or set())
+            ):
+                raise ApiError(f"标签已停用：{tag['name']}")
+            if tag_id not in unique:
+                unique.append(tag_id)
+        selected = set(unique)
+        return [
+            tag_id
+            for tag_id in unique
+            if not any(
+                tag_id in {
+                    ancestor["id"]
+                    for ancestor in self._tag_path(other_id, tags)[:-1]
+                }
+                for other_id in selected
+                if other_id != tag_id
+            )
+        ]
+
+    def _normalize_config(self, raw: Any) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            raise ApiError("策略配置无效")
+        baskets_payload = raw.get("baskets", {})
+        splice_payload = raw.get("spliceSimulation", {})
+        if not isinstance(baskets_payload, dict) or not isinstance(splice_payload, dict):
+            raise ApiError("资产篮子配置无效")
+
+        baskets = {
+            category: unique_ids(baskets_payload.get(category, []))
+            for category in CATEGORY_LABELS
+        }
+        splice_baskets_payload = splice_payload.get("baskets", {})
+        if not isinstance(splice_baskets_payload, dict):
+            raise ApiError("拼接模拟资产篮子配置无效")
+        splice_baskets = {
+            category: unique_ids(splice_baskets_payload.get(category, []))
+            for category in CATEGORY_LABELS
+        }
+        controls = raw.get("ma20Controls", {})
+        if not isinstance(controls, dict):
+            controls = {}
+        date_range = raw.get("dateRange", {})
+        if not isinstance(date_range, dict):
+            date_range = {}
+        parsed_weights = parse_stage_weights(raw.get("stageWeights"))
+        serialized_weights = {
+            str(stage): {category: float(weight) for category, weight in weights.items()}
+            for stage, weights in parsed_weights.items()
+        }
+        profile = self._detect_stage_profile(serialized_weights)
+        requested_profile = str(raw.get("stageWeightProfile") or "")
+        if requested_profile in STAGE_WEIGHT_PROFILE_SPECS and profile == requested_profile:
+            profile = requested_profile
+        return {
+            "baskets": baskets,
+            "spliceSimulation": {
+                "enabled": bool(splice_payload.get("enabled")),
+                "baskets": splice_baskets,
+            },
+            "ma20Controls": {
+                "equity": bool(controls.get("equity")),
+                "commodity": bool(controls.get("commodity")),
+            },
+            "dateRange": {
+                "start": str(date_range.get("start") or ""),
+                "end": str(date_range.get("end") or ""),
+            },
+            "stageWeights": serialized_weights,
+            "stageWeightProfile": profile or "custom",
+        }
+
+    def _detect_stage_profile(self, weights: dict[str, dict[str, float]]) -> str | None:
+        for level in STAGE_WEIGHT_PROFILE_SPECS:
+            expected = build_stage_weight_profile(level)
+            if all(
+                abs(weights[str(stage)][category] - expected[str(stage)][category]) < 1e-9
+                for stage in STAGE_DOMINANT
+                for category in CATEGORY_LABELS
+            ):
+                return level
+        return None
+
+    def _asset_ids(self, config: dict[str, Any]) -> list[str]:
+        ids: list[str] = []
+        for category in CATEGORY_LABELS:
+            ids.extend(config["baskets"].get(category, []))
+            if config["spliceSimulation"]["enabled"]:
+                ids.extend(config["spliceSimulation"]["baskets"].get(category, []))
+        return list(dict.fromkeys(ids))
+
+    def _asset_snapshots(self, config: dict[str, Any]) -> list[dict[str, Any]]:
+        store.ensure_loaded()
+        snapshots: list[dict[str, Any]] = []
+        missing: list[str] = []
+        for asset_id in self._asset_ids(config):
+            meta = store.meta.get(asset_id)
+            if meta is None:
+                missing.append(asset_id)
+                continue
+            snapshots.append(
+                {
+                    "id": meta.id,
+                    "code": meta.code,
+                    "name": meta.name,
+                    "module": meta.module,
+                    "category": meta.category,
+                }
+            )
+        if missing:
+            raise ApiError(f"以下资产已失效：{', '.join(missing)}")
+        return snapshots
+
+    def _summary(self, result: dict[str, Any]) -> dict[str, Any]:
+        metrics = [metric for metric in result.get("metrics", []) if metric]
+        if not metrics:
+            raise ApiError("回测结果缺少核心指标")
+        metric = metrics[0]
+        return {
+            "runAt": utc_now(),
+            "window": deepcopy(result.get("window", {})),
+            "totalReturn": metric.get("totalReturn"),
+            "annualReturn": metric.get("annualReturn"),
+            "maxDrawdown": metric.get("maxDrawdown"),
+            "sharpe": metric.get("sharpe"),
+        }
+
+    def _run_and_snapshot(
+        self,
+        raw_config: Any,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+        config = self._normalize_config(raw_config)
+        snapshots = self._asset_snapshots(config)
+        try:
+            result = run_backtest(config)
+        except ApiError:
+            raise
+        except Exception as exc:
+            raise ApiError(str(exc)) from exc
+        return config, snapshots, self._summary(result)
+
+    def _serialize(self, data: dict[str, Any]) -> dict[str, Any]:
+        tags = self._tag_map(data)
+        serialized_tags: list[dict[str, Any]] = []
+        for tag in data["tags"]:
+            path = self._tag_path(tag["id"], tags)
+            serialized_tags.append(
+                {
+                    **deepcopy(tag),
+                    "depth": len(path),
+                    "pathIds": [item["id"] for item in path],
+                    "pathNames": [item["name"] for item in path],
+                    "path": " / ".join(item["name"] for item in path),
+                }
+            )
+
+        store.ensure_loaded()
+        serialized_strategies: list[dict[str, Any]] = []
+        for strategy in data["strategies"]:
+            missing_ids = [
+                asset_id
+                for asset_id in self._asset_ids(strategy["config"])
+                if asset_id not in store.meta
+            ]
+            snapshot_map = {
+                item["id"]: item for item in strategy.get("assetSnapshots", [])
+            }
+            missing_assets = [
+                snapshot_map.get(
+                    asset_id,
+                    {"id": asset_id, "code": asset_id, "name": asset_id},
+                )
+                for asset_id in missing_ids
+            ]
+            tag_paths = []
+            for tag_id in strategy.get("tagIds", []):
+                if tag_id not in tags:
+                    continue
+                path = self._tag_path(tag_id, tags)
+                tag_paths.append(
+                    {
+                        "id": tag_id,
+                        "pathIds": [item["id"] for item in path],
+                        "pathNames": [item["name"] for item in path],
+                        "path": " / ".join(item["name"] for item in path),
+                        "active": bool(tags[tag_id].get("active", True)),
+                    }
+                )
+            serialized_strategies.append(
+                {
+                    **deepcopy(strategy),
+                    "tagPaths": tag_paths,
+                    "missingAssets": missing_assets,
+                    "assetCount": len(self._asset_ids(strategy["config"])),
+                }
+            )
+        serialized_strategies.sort(key=lambda item: item["updatedAt"], reverse=True)
+        return {
+            "schemaVersion": self.SCHEMA_VERSION,
+            "strategies": serialized_strategies,
+            "tags": serialized_tags,
+        }
+
+    def list_all(self) -> dict[str, Any]:
+        with self.lock:
+            return self._serialize(self._read_unlocked())
+
+    def create_strategy(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config, snapshots, summary = self._run_and_snapshot(payload.get("config"))
+        with self.lock:
+            data = self._read_unlocked()
+            tags = self._tag_map(data)
+            name = self._validate_strategy_name(payload.get("name"), data["strategies"])
+            now = utc_now()
+            strategy = {
+                "id": uuid.uuid4().hex,
+                "name": name,
+                "notes": self._normalize_notes(payload.get("notes")),
+                "tagIds": self._normalize_tag_ids(payload.get("tagIds", []), tags, True),
+                "createdAt": now,
+                "updatedAt": now,
+                "config": config,
+                "assetSnapshots": snapshots,
+                "summary": summary,
+            }
+            data["strategies"].append(strategy)
+            self._write_unlocked(data)
+            return next(
+                item
+                for item in self._serialize(data)["strategies"]
+                if item["id"] == strategy["id"]
+            )
+
+    def update_strategy(self, strategy_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        config, snapshots, summary = self._run_and_snapshot(payload.get("config"))
+        with self.lock:
+            data = self._read_unlocked()
+            strategy = self._strategy_map(data).get(strategy_id)
+            if strategy is None:
+                raise ApiError("策略不存在", status=404)
+            tags = self._tag_map(data)
+            requested_tag_ids = payload.get("tagIds", strategy.get("tagIds", []))
+            strategy.update(
+                {
+                    "name": self._validate_strategy_name(
+                        payload.get("name"),
+                        data["strategies"],
+                        exclude_id=strategy_id,
+                    ),
+                    "notes": self._normalize_notes(payload.get("notes")),
+                    "tagIds": self._normalize_tag_ids(
+                        requested_tag_ids,
+                        tags,
+                        requested_tag_ids != strategy.get("tagIds", []),
+                        set(strategy.get("tagIds", [])),
+                    ),
+                    "updatedAt": utc_now(),
+                    "config": config,
+                    "assetSnapshots": snapshots,
+                    "summary": summary,
+                }
+            )
+            self._write_unlocked(data)
+            return next(
+                item
+                for item in self._serialize(data)["strategies"]
+                if item["id"] == strategy_id
+            )
+
+    def update_metadata(self, strategy_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            data = self._read_unlocked()
+            strategy = self._strategy_map(data).get(strategy_id)
+            if strategy is None:
+                raise ApiError("策略不存在", status=404)
+            tags = self._tag_map(data)
+            current_tag_ids = strategy.get("tagIds", [])
+            requested_tag_ids = payload.get("tagIds", current_tag_ids)
+            require_active = requested_tag_ids != current_tag_ids
+            strategy.update(
+                {
+                    "name": self._validate_strategy_name(
+                        payload.get("name", strategy["name"]),
+                        data["strategies"],
+                        exclude_id=strategy_id,
+                    ),
+                    "notes": self._normalize_notes(
+                        payload.get("notes", strategy.get("notes", ""))
+                    ),
+                    "tagIds": self._normalize_tag_ids(
+                        requested_tag_ids,
+                        tags,
+                        require_active,
+                        set(current_tag_ids),
+                    ),
+                    "updatedAt": utc_now(),
+                }
+            )
+            self._write_unlocked(data)
+            return next(
+                item
+                for item in self._serialize(data)["strategies"]
+                if item["id"] == strategy_id
+            )
+
+    def duplicate_strategy(self, strategy_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            data = self._read_unlocked()
+            source = self._strategy_map(data).get(strategy_id)
+            if source is None:
+                raise ApiError("策略不存在", status=404)
+            requested_name = str(payload.get("name") or "").strip()
+            if not requested_name:
+                base = f"{source['name']} - 副本"
+                requested_name = base
+                suffix = 2
+                existing = {item["name"].casefold() for item in data["strategies"]}
+                while requested_name.casefold() in existing:
+                    requested_name = f"{base} {suffix}"
+                    suffix += 1
+            now = utc_now()
+            duplicate = deepcopy(source)
+            duplicate.update(
+                {
+                    "id": uuid.uuid4().hex,
+                    "name": self._validate_strategy_name(
+                        requested_name,
+                        data["strategies"],
+                    ),
+                    "createdAt": now,
+                    "updatedAt": now,
+                }
+            )
+            data["strategies"].append(duplicate)
+            self._write_unlocked(data)
+            return next(
+                item
+                for item in self._serialize(data)["strategies"]
+                if item["id"] == duplicate["id"]
+            )
+
+    def rerun_strategy(self, strategy_id: str) -> dict[str, Any]:
+        with self.lock:
+            data = self._read_unlocked()
+            strategy = self._strategy_map(data).get(strategy_id)
+            if strategy is None:
+                raise ApiError("策略不存在", status=404)
+            raw_config = deepcopy(strategy["config"])
+
+        config = self._normalize_config(raw_config)
+        snapshots = self._asset_snapshots(config)
+        try:
+            result = run_backtest(config)
+        except Exception as exc:
+            raise ApiError(str(exc)) from exc
+        summary = self._summary(result)
+
+        with self.lock:
+            data = self._read_unlocked()
+            strategy = self._strategy_map(data).get(strategy_id)
+            if strategy is None:
+                raise ApiError("策略不存在", status=404)
+            strategy.update(
+                {
+                    "config": config,
+                    "assetSnapshots": snapshots,
+                    "summary": summary,
+                    "updatedAt": utc_now(),
+                }
+            )
+            self._write_unlocked(data)
+            serialized = next(
+                item
+                for item in self._serialize(data)["strategies"]
+                if item["id"] == strategy_id
+            )
+        return {"strategy": serialized, "result": result}
+
+    def delete_strategy(self, strategy_id: str) -> None:
+        with self.lock:
+            data = self._read_unlocked()
+            before = len(data["strategies"])
+            data["strategies"] = [
+                item for item in data["strategies"] if item["id"] != strategy_id
+            ]
+            if len(data["strategies"]) == before:
+                raise ApiError("策略不存在", status=404)
+            self._write_unlocked(data)
+
+    def create_tag(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            data = self._read_unlocked()
+            tags = self._tag_map(data)
+            name = str(payload.get("name") or "").strip()
+            if not name:
+                raise ApiError("请输入标签名称")
+            if len(name) > 60:
+                raise ApiError("标签名称不能超过 60 个字符")
+            parent_id = payload.get("parentId") or None
+            if parent_id is not None:
+                parent_id = str(parent_id)
+                if parent_id not in tags:
+                    raise ApiError("上级标签不存在", status=404)
+                if self._tag_depth(parent_id, tags) >= 3:
+                    raise ApiError("标签最多支持三级")
+            self._validate_sibling_name(name, parent_id, tags)
+            now = utc_now()
+            tag = {
+                "id": uuid.uuid4().hex,
+                "name": name,
+                "parentId": parent_id,
+                "active": True,
+                "createdAt": now,
+                "updatedAt": now,
+            }
+            data["tags"].append(tag)
+            self._write_unlocked(data)
+            return next(
+                item
+                for item in self._serialize(data)["tags"]
+                if item["id"] == tag["id"]
+            )
+
+    def update_tag(self, tag_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            data = self._read_unlocked()
+            tags = self._tag_map(data)
+            tag = tags.get(tag_id)
+            if tag is None:
+                raise ApiError("标签不存在", status=404)
+            name = str(payload.get("name", tag["name"]) or "").strip()
+            if not name:
+                raise ApiError("请输入标签名称")
+            if len(name) > 60:
+                raise ApiError("标签名称不能超过 60 个字符")
+            parent_id = payload.get("parentId", tag.get("parentId")) or None
+            if parent_id is not None:
+                parent_id = str(parent_id)
+                if parent_id not in tags:
+                    raise ApiError("上级标签不存在", status=404)
+                if parent_id == tag_id or parent_id in self._descendants(tag_id, tags):
+                    raise ApiError("标签不能移动到自身或其下级标签中")
+
+            trial = deepcopy(tags)
+            trial[tag_id]["parentId"] = parent_id
+            subtree = self._descendants(tag_id, trial)
+            max_depth = max(self._tag_depth(item_id, trial) for item_id in subtree)
+            if max_depth > 3:
+                raise ApiError("移动后将超过三级标签限制")
+            self._validate_sibling_name(name, parent_id, tags, exclude_id=tag_id)
+            tag.update(
+                {
+                    "name": name,
+                    "parentId": parent_id,
+                    "active": bool(payload.get("active", tag.get("active", True))),
+                    "updatedAt": utc_now(),
+                }
+            )
+            self._write_unlocked(data)
+            return next(
+                item
+                for item in self._serialize(data)["tags"]
+                if item["id"] == tag_id
+            )
+
+    def delete_tag(self, tag_id: str) -> None:
+        with self.lock:
+            data = self._read_unlocked()
+            tags = self._tag_map(data)
+            if tag_id not in tags:
+                raise ApiError("标签不存在", status=404)
+            if any(tag.get("parentId") == tag_id for tag in data["tags"]):
+                raise ApiError("存在下级标签，不能彻底删除")
+            if any(tag_id in strategy.get("tagIds", []) for strategy in data["strategies"]):
+                raise ApiError("仍有策略引用该标签，不能彻底删除")
+            data["tags"] = [tag for tag in data["tags"] if tag["id"] != tag_id]
+            self._write_unlocked(data)
+
+
+strategy_store = StrategyStore(STRATEGY_STORE_FILE)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "LocalBacktest/1.0"
 
@@ -1889,18 +2545,117 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/assets":
             self.send_json(store.grouped_assets())
             return
+        if parsed.path == "/api/strategies":
+            self.handle_api(lambda: strategy_store.list_all())
+            return
         self.serve_static(parsed.path)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path != "/api/backtest":
-            self.send_error(404)
+        if parsed.path == "/api/backtest":
+            self.handle_api(lambda: run_backtest(self.read_json()))
             return
+        if parsed.path == "/api/strategies":
+            self.handle_api(
+                lambda: strategy_store.create_strategy(self.read_json()),
+                status=201,
+            )
+            return
+        segments = self.api_segments(parsed.path)
+        if len(segments) == 3 and segments[:1] == ["strategies"] and segments[2] == "duplicate":
+            self.handle_api(
+                lambda: strategy_store.duplicate_strategy(
+                    segments[1],
+                    self.read_json(),
+                ),
+                status=201,
+            )
+            return
+        if len(segments) == 3 and segments[:1] == ["strategies"] and segments[2] == "rerun":
+            self.handle_api(lambda: strategy_store.rerun_strategy(segments[1]))
+            return
+        if parsed.path == "/api/tags":
+            self.handle_api(
+                lambda: strategy_store.create_tag(self.read_json()),
+                status=201,
+            )
+            return
+        self.send_error(404)
+
+    def do_PUT(self) -> None:
+        segments = self.api_segments(urlparse(self.path).path)
+        if len(segments) == 2 and segments[0] == "strategies":
+            self.handle_api(
+                lambda: strategy_store.update_strategy(
+                    segments[1],
+                    self.read_json(),
+                )
+            )
+            return
+        self.send_error(404)
+
+    def do_PATCH(self) -> None:
+        segments = self.api_segments(urlparse(self.path).path)
+        if len(segments) == 2 and segments[0] == "strategies":
+            self.handle_api(
+                lambda: strategy_store.update_metadata(
+                    segments[1],
+                    self.read_json(),
+                )
+            )
+            return
+        if len(segments) == 2 and segments[0] == "tags":
+            self.handle_api(
+                lambda: strategy_store.update_tag(
+                    segments[1],
+                    self.read_json(),
+                )
+            )
+            return
+        self.send_error(404)
+
+    def do_DELETE(self) -> None:
+        segments = self.api_segments(urlparse(self.path).path)
+        if len(segments) == 2 and segments[0] == "strategies":
+            self.handle_api(
+                lambda: strategy_store.delete_strategy(segments[1]),
+                status=204,
+            )
+            return
+        if len(segments) == 2 and segments[0] == "tags":
+            self.handle_api(
+                lambda: strategy_store.delete_tag(segments[1]),
+                status=204,
+            )
+            return
+        self.send_error(404)
+
+    def api_segments(self, path: str) -> list[str]:
+        if not path.startswith("/api/"):
+            return []
+        return [segment for segment in path[5:].split("/") if segment]
+
+    def read_json(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        payload = json.loads(body or "{}")
+        if not isinstance(payload, dict):
+            raise ApiError("请求内容必须为对象")
+        return payload
+
+    def handle_api(self, action: Any, status: int = 200) -> None:
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8")
-            payload = json.loads(body or "{}")
-            self.send_json(run_backtest(payload))
+            payload = action()
+            if status == 204:
+                self.send_response(204)
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
+            self.send_json(payload, status=status)
+        except ApiError as exc:
+            self.send_json({"error": str(exc)}, status=exc.status)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self.send_json({"error": f"请求内容不是有效 JSON：{exc}"}, status=400)
         except Exception as exc:
             traceback.print_exc()
             self.send_json({"error": str(exc)}, status=400)
@@ -1923,7 +2678,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def send_json(self, payload: Any, status: int = 200) -> None:
-        payload = {**payload, "metrics": [m for m in payload.get("metrics", []) if m]} if isinstance(payload, dict) else payload
+        if isinstance(payload, dict) and isinstance(payload.get("metrics"), list):
+            payload = {
+                **payload,
+                "metrics": [metric for metric in payload["metrics"] if metric],
+            }
         data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")

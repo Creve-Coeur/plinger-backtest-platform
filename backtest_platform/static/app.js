@@ -59,6 +59,13 @@ const state = {
   attributionMode: "stage",
   pring: null,
   result: null,
+  strategies: [],
+  tags: [],
+  activeStrategyId: null,
+  lastSuccessfulConfigSignature: null,
+  strategyModalMode: "save",
+  editingStrategyId: null,
+  selectedStrategyTagIds: new Set(),
 };
 
 const els = {
@@ -95,6 +102,40 @@ const els = {
   efficiencyTable: document.getElementById("efficiencyTable"),
   tradeTable: document.getElementById("tradeTable"),
   riskTable: document.getElementById("riskTable"),
+  workspaceView: document.getElementById("workspaceView"),
+  strategyLibraryView: document.getElementById("strategyLibraryView"),
+  saveStrategyBtn: document.getElementById("saveStrategyBtn"),
+  strategyLibraryBtn: document.getElementById("strategyLibraryBtn"),
+  workspaceNavBtn: document.getElementById("workspaceNavBtn"),
+  strategyLibraryCount: document.getElementById("strategyLibraryCount"),
+  strategySearchInput: document.getElementById("strategySearchInput"),
+  strategyTagFilter: document.getElementById("strategyTagFilter"),
+  strategyCards: document.getElementById("strategyCards"),
+  tagManagerBtn: document.getElementById("tagManagerBtn"),
+  strategyModal: document.getElementById("strategyModal"),
+  strategyModalTitle: document.getElementById("strategyModalTitle"),
+  strategyModalHint: document.getElementById("strategyModalHint"),
+  closeStrategyModalBtn: document.getElementById("closeStrategyModalBtn"),
+  cancelStrategyModalBtn: document.getElementById("cancelStrategyModalBtn"),
+  strategyNameInput: document.getElementById("strategyNameInput"),
+  strategyNotesInput: document.getElementById("strategyNotesInput"),
+  strategyNotesCount: document.getElementById("strategyNotesCount"),
+  strategyTagSelector: document.getElementById("strategyTagSelector"),
+  strategyFormError: document.getElementById("strategyFormError"),
+  saveAsStrategyBtn: document.getElementById("saveAsStrategyBtn"),
+  submitStrategyBtn: document.getElementById("submitStrategyBtn"),
+  tagManagerModal: document.getElementById("tagManagerModal"),
+  closeTagManagerBtn: document.getElementById("closeTagManagerBtn"),
+  tagManagerTree: document.getElementById("tagManagerTree"),
+  addRootTagBtn: document.getElementById("addRootTagBtn"),
+  tagEditorForm: document.getElementById("tagEditorForm"),
+  tagEditorId: document.getElementById("tagEditorId"),
+  tagNameInput: document.getElementById("tagNameInput"),
+  tagParentSelect: document.getElementById("tagParentSelect"),
+  tagActiveRow: document.getElementById("tagActiveRow"),
+  tagActiveInput: document.getElementById("tagActiveInput"),
+  tagEditorError: document.getElementById("tagEditorError"),
+  deleteTagBtn: document.getElementById("deleteTagBtn"),
 };
 
 init();
@@ -117,6 +158,8 @@ async function init() {
     Object.values(state.grouped).flat().forEach((asset) => state.assetsById.set(asset.id, asset));
     resetDefaults();
     renderAssets();
+    await loadStrategyLibrary();
+    handleRoute();
     setStatus(
       `已加载 ${state.assetsById.size} 个资产；月度普林格信号 ${data.pring?.start || "-"} 至 ${data.pring?.end || "-"}，共 ${data.pring?.rows || 0} 条；数据源：${data.pring?.source || "-"}。`,
       "ok",
@@ -152,9 +195,21 @@ function wireEvents() {
     }
   });
   els.runBtn.addEventListener("click", runBacktest);
-  els.spliceToggle.addEventListener("change", renderSplicePool);
-  els.startDate.addEventListener("change", validateDateInputs);
-  els.endDate.addEventListener("change", validateDateInputs);
+  els.spliceToggle.addEventListener("change", () => {
+    renderSplicePool();
+    configChanged();
+  });
+  els.ma20Equity.addEventListener("change", configChanged);
+  els.ma20Commodity.addEventListener("change", configChanged);
+  els.startDate.addEventListener("change", () => {
+    validateDateInputs();
+    configChanged();
+  });
+  els.endDate.addEventListener("change", () => {
+    validateDateInputs();
+    configChanged();
+  });
+  wireStrategyEvents();
   document.querySelectorAll("[data-attribution-mode]").forEach((button) => {
     button.addEventListener("click", () => setAttributionMode(button.dataset.attributionMode));
   });
@@ -205,6 +260,7 @@ function resetDefaults() {
   renderBaskets();
   renderSplicePool();
   updateDateRangeBounds(true);
+  configChanged();
 }
 
 function clearBaskets() {
@@ -216,6 +272,7 @@ function clearBaskets() {
   els.endDate.value = "";
   els.dateRangeHint.textContent = "请先为四类资产选择标的";
   setStatus("四类资产篮子已清空。", "");
+  configChanged();
 }
 
 function emptyBaskets() {
@@ -363,6 +420,7 @@ function renderBaskets() {
       item.querySelector("button").addEventListener("click", () => {
         state.baskets[basket] = state.baskets[basket].filter((assetId) => assetId !== id);
         renderBaskets();
+        configChanged();
       });
       zone.appendChild(item);
     });
@@ -396,6 +454,7 @@ function renderSplicePool() {
       item.querySelector("button").addEventListener("click", () => {
         state.spliceBaskets[basket] = state.spliceBaskets[basket].filter((assetId) => assetId !== id);
         renderSplicePool();
+        configChanged();
       });
       zone.appendChild(item);
     });
@@ -414,6 +473,7 @@ function addToBasket(id, basket) {
   state.baskets[basket].push(id);
   renderBaskets();
   renderSplicePool();
+  configChanged();
 }
 
 function addToSpliceBasket(id, basket) {
@@ -428,6 +488,48 @@ function addToSpliceBasket(id, basket) {
   });
   state.spliceBaskets[basket].push(id);
   renderSplicePool();
+  configChanged();
+}
+
+function currentConfig() {
+  return {
+    baskets: JSON.parse(JSON.stringify(state.baskets)),
+    spliceSimulation: {
+      enabled: els.spliceToggle.checked,
+      baskets: JSON.parse(JSON.stringify(state.spliceBaskets)),
+    },
+    ma20Controls: {
+      equity: els.ma20Equity.checked,
+      commodity: els.ma20Commodity.checked,
+    },
+    dateRange: {
+      start: els.startDate.value || "",
+      end: els.endDate.value || "",
+    },
+    stageWeights: cloneWeights(state.stageWeights),
+    stageWeightProfile: state.stageWeightProfile || "custom",
+  };
+}
+
+function currentConfigSignature() {
+  return JSON.stringify(currentConfig());
+}
+
+function configChanged() {
+  updateSaveStrategyState();
+  if (state.result && state.lastSuccessfulConfigSignature !== currentConfigSignature()) {
+    setStatus("当前配置已变化，请重新回测后再保存策略。", "");
+  }
+}
+
+function updateSaveStrategyState() {
+  const ready = Boolean(
+    state.result
+      && state.lastSuccessfulConfigSignature
+      && state.lastSuccessfulConfigSignature === currentConfigSignature(),
+  );
+  els.saveStrategyBtn.disabled = !ready;
+  els.saveStrategyBtn.title = ready ? "保存当前策略配置" : "请先完成与当前配置匹配的回测";
 }
 
 async function runBacktest() {
@@ -435,22 +537,8 @@ async function runBacktest() {
   setStatus("正在运行回测...", "");
   els.runBtn.disabled = true;
   try {
-    const payload = {
-      baskets: state.baskets,
-      spliceSimulation: {
-        enabled: els.spliceToggle.checked,
-        baskets: state.spliceBaskets,
-      },
-      ma20Controls: {
-        equity: els.ma20Equity.checked,
-        commodity: els.ma20Commodity.checked,
-      },
-      dateRange: {
-        start: els.startDate.value || null,
-        end: els.endDate.value || null,
-      },
-      stageWeights: state.stageWeights,
-    };
+    const payload = currentConfig();
+    const signature = JSON.stringify(payload);
     const res = await fetch("/api/backtest", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -459,10 +547,14 @@ async function runBacktest() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "回测失败");
     state.result = data;
+    state.lastSuccessfulConfigSignature = signature;
     renderResult(data);
+    updateSaveStrategyState();
     setStatus("回测完成。", "ok");
+    return true;
   } catch (err) {
     setStatus(err.message || String(err), "error");
+    return false;
   } finally {
     els.runBtn.disabled = false;
   }
@@ -559,8 +651,9 @@ function applyStageWeightProfile(level) {
   state.stageWeightProfile = level;
   updateStageProfileControls();
   updateStageSettingsButton();
+  configChanged();
   setStatus(
-    `Stage 资产比例已切换为${profile.label}（${profile.shortLabel}）。`,
+    `Stage 资产比例已切换为${profile.label}（${profile.shortLabel}），请重新回测后保存。`,
     "ok",
   );
 }
@@ -634,12 +727,13 @@ function applyStageSettings() {
     state.stageWeightProfile = detectStageWeightProfile(state.stageWeights);
     updateStageProfileControls();
     updateStageSettingsButton();
+    configChanged();
     closeStageSettings();
     const appliedProfile = state.stageWeightProfiles[state.stageWeightProfile];
     setStatus(
       appliedProfile
-        ? `Stage 资产比例已切换为${appliedProfile.label}（${appliedProfile.shortLabel}）。`
-        : "Stage 资产比例已更新为自定义配置。",
+        ? `Stage 资产比例已切换为${appliedProfile.label}（${appliedProfile.shortLabel}），请重新回测后保存。`
+        : "Stage 资产比例已更新为自定义配置，请重新回测后保存。",
       "ok",
     );
   } catch (err) {
@@ -1466,4 +1560,576 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function wireStrategyEvents() {
+  window.addEventListener("hashchange", handleRoute);
+  els.strategyLibraryBtn.addEventListener("click", () => {
+    window.location.hash = "strategies";
+  });
+  els.workspaceNavBtn.addEventListener("click", () => {
+    window.location.hash = "workspace";
+  });
+  els.saveStrategyBtn.addEventListener("click", openSaveStrategyModal);
+  els.closeStrategyModalBtn.addEventListener("click", closeStrategyModal);
+  els.cancelStrategyModalBtn.addEventListener("click", closeStrategyModal);
+  els.strategyModal.addEventListener("click", (event) => {
+    if (event.target === els.strategyModal) closeStrategyModal();
+  });
+  els.strategyNotesInput.addEventListener("input", () => {
+    els.strategyNotesCount.textContent = `${els.strategyNotesInput.value.length} / 2000`;
+  });
+  els.strategyTagSelector.addEventListener("change", handleStrategyTagSelection);
+  els.submitStrategyBtn.addEventListener("click", () => submitStrategy(false));
+  els.saveAsStrategyBtn.addEventListener("click", () => submitStrategy(true));
+  els.strategySearchInput.addEventListener("input", renderStrategyCards);
+  els.strategyTagFilter.addEventListener("change", renderStrategyCards);
+  els.strategyCards.addEventListener("click", handleStrategyCardAction);
+  els.tagManagerBtn.addEventListener("click", openTagManager);
+  els.closeTagManagerBtn.addEventListener("click", closeTagManager);
+  els.tagManagerModal.addEventListener("click", (event) => {
+    if (event.target === els.tagManagerModal) closeTagManager();
+  });
+  els.addRootTagBtn.addEventListener("click", () => showTagEditor(null, null));
+  els.tagManagerTree.addEventListener("click", handleTagManagerAction);
+  els.tagEditorForm.addEventListener("submit", saveTagEditor);
+  els.deleteTagBtn.addEventListener("click", deleteCurrentTag);
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (!els.strategyModal.classList.contains("hidden")) closeStrategyModal();
+    if (!els.tagManagerModal.classList.contains("hidden")) closeTagManager();
+  });
+}
+
+async function apiRequest(path, options = {}) {
+  const request = { ...options };
+  request.headers = { ...(options.headers || {}) };
+  if (options.body && typeof options.body !== "string") {
+    request.headers["Content-Type"] = "application/json";
+    request.body = JSON.stringify(options.body);
+  }
+  const response = await fetch(path, request);
+  if (response.status === 204) return null;
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "操作失败");
+  return data;
+}
+
+async function loadStrategyLibrary() {
+  const data = await apiRequest("/api/strategies");
+  state.strategies = data.strategies || [];
+  state.tags = data.tags || [];
+  if (
+    state.activeStrategyId
+    && !state.strategies.some((strategy) => strategy.id === state.activeStrategyId)
+  ) {
+    state.activeStrategyId = null;
+  }
+  renderStrategyTagFilter();
+  renderStrategyCards();
+  renderTagManagerTree();
+}
+
+function handleRoute() {
+  const showLibrary = window.location.hash === "#strategies";
+  els.workspaceView.classList.toggle("hidden", showLibrary);
+  els.strategyLibraryView.classList.toggle("hidden", !showLibrary);
+  els.workspaceNavBtn.classList.toggle("hidden", !showLibrary);
+  els.strategyLibraryBtn.classList.toggle("hidden", showLibrary);
+  document.querySelectorAll(".workspace-only").forEach((element) => {
+    element.classList.toggle("hidden", showLibrary);
+  });
+  if (showLibrary) {
+    loadStrategyLibrary().catch((err) => {
+      els.strategyLibraryCount.textContent = err.message || String(err);
+    });
+  }
+}
+
+function renderStrategyTagFilter() {
+  const current = els.strategyTagFilter.value;
+  const options = state.tags
+    .slice()
+    .sort((a, b) => a.path.localeCompare(b.path, "zh-CN"))
+    .map((tag) => (
+      `<option value="${tag.id}">${escapeHtml(tag.path)}${tag.active ? "" : "（已停用）"}</option>`
+    ))
+    .join("");
+  els.strategyTagFilter.innerHTML = `<option value="">全部标签</option>${options}`;
+  if (state.tags.some((tag) => tag.id === current)) {
+    els.strategyTagFilter.value = current;
+  }
+}
+
+function renderStrategyCards() {
+  const query = els.strategySearchInput.value.trim().toLowerCase();
+  const tagId = els.strategyTagFilter.value;
+  const filtered = state.strategies.filter((strategy) => {
+    const tagText = (strategy.tagPaths || []).map((item) => item.path).join(" ");
+    const haystack = `${strategy.name} ${strategy.notes || ""} ${tagText}`.toLowerCase();
+    const matchesText = !query || haystack.includes(query);
+    const matchesTag = !tagId || (strategy.tagPaths || []).some(
+      (item) => item.pathIds.includes(tagId),
+    );
+    return matchesText && matchesTag;
+  });
+  els.strategyLibraryCount.textContent =
+    `共保存 ${state.strategies.length} 个策略，当前显示 ${filtered.length} 个`;
+  if (!filtered.length) {
+    els.strategyCards.innerHTML = `
+      <div class="strategy-empty">
+        <h3>${state.strategies.length ? "没有符合筛选条件的策略" : "策略库还是空的"}</h3>
+        <p>${state.strategies.length ? "调整搜索词或标签筛选后再看。" : "完成一次回测后，可从工作台保存当前策略。"}</p>
+      </div>
+    `;
+    return;
+  }
+  els.strategyCards.innerHTML = filtered.map(renderStrategyCard).join("");
+}
+
+function renderStrategyCard(strategy) {
+  const summary = strategy.summary || {};
+  const windowInfo = summary.window || {};
+  const tags = (strategy.tagPaths || []).length
+    ? strategy.tagPaths.map((item) => (
+      `<span class="strategy-tag${item.active ? "" : " inactive"}">${escapeHtml(item.path)}</span>`
+    )).join("")
+    : `<span class="strategy-tag empty">未设置标签</span>`;
+  const missing = (strategy.missingAssets || []).length;
+  return `
+    <article class="strategy-card${missing ? " has-missing-assets" : ""}">
+      <header class="strategy-card-head">
+        <div>
+          <h3>${escapeHtml(strategy.name)}</h3>
+          <p>更新于 ${escapeHtml(formatDateTime(strategy.updatedAt))}</p>
+        </div>
+        <span class="asset-count-badge">${strategy.assetCount || 0} 个标的</span>
+      </header>
+      <div class="strategy-tags">${tags}</div>
+      <p class="strategy-notes">${escapeHtml(strategy.notes || "暂无备注")}</p>
+      ${missing ? `<p class="missing-warning">有 ${missing} 个标的已失效，暂时不能载入</p>` : ""}
+      <div class="strategy-metrics">
+        <div><span>回测区间</span><strong>${escapeHtml(windowInfo.start || "-")}<br>${escapeHtml(windowInfo.end || "-")}</strong></div>
+        <div><span>累计收益</span><strong>${pct(summary.totalReturn)}</strong></div>
+        <div><span>年化收益</span><strong>${pct(summary.annualReturn)}</strong></div>
+        <div><span>最大回撤</span><strong>${pct(summary.maxDrawdown)}</strong></div>
+        <div><span>夏普</span><strong>${num(summary.sharpe)}</strong></div>
+      </div>
+      <footer class="strategy-card-actions">
+        <button class="ghost-btn" type="button" data-strategy-action="load" data-id="${strategy.id}">载入</button>
+        <button class="primary-btn" type="button" data-strategy-action="rerun" data-id="${strategy.id}">载入并回测</button>
+        <button class="ghost-btn" type="button" data-strategy-action="edit" data-id="${strategy.id}">编辑</button>
+        <button class="ghost-btn" type="button" data-strategy-action="duplicate" data-id="${strategy.id}">复制</button>
+        <button class="ghost-btn danger-btn" type="button" data-strategy-action="delete" data-id="${strategy.id}">删除</button>
+      </footer>
+    </article>
+  `;
+}
+
+async function handleStrategyCardAction(event) {
+  const button = event.target.closest("[data-strategy-action]");
+  if (!button) return;
+  const strategy = state.strategies.find((item) => item.id === button.dataset.id);
+  if (!strategy) return;
+  const action = button.dataset.strategyAction;
+  if (action === "load" || action === "rerun") {
+    const loaded = loadStrategyIntoWorkspace(strategy);
+    if (loaded && action === "rerun") {
+      button.disabled = true;
+      setStatus(`正在重新回测策略“${strategy.name}”...`, "");
+      try {
+        const data = await apiRequest(`/api/strategies/${strategy.id}/rerun`, {
+          method: "POST",
+          body: {},
+        });
+        state.result = data.result;
+        state.lastSuccessfulConfigSignature = currentConfigSignature();
+        renderResult(data.result);
+        updateSaveStrategyState();
+        await loadStrategyLibrary();
+        setStatus(`策略“${strategy.name}”重新回测完成，核心指标已更新。`, "ok");
+      } catch (err) {
+        setStatus(err.message || String(err), "error");
+      } finally {
+        button.disabled = false;
+      }
+    }
+    return;
+  }
+  if (action === "edit") {
+    openMetadataEditor(strategy);
+    return;
+  }
+  if (action === "duplicate") {
+    button.disabled = true;
+    try {
+      const duplicate = await apiRequest(`/api/strategies/${strategy.id}/duplicate`, {
+        method: "POST",
+        body: {},
+      });
+      await loadStrategyLibrary();
+      setLibraryNotice(`已复制为“${duplicate.name}”。`);
+    } catch (err) {
+      setLibraryNotice(err.message || String(err), true);
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
+  if (action === "delete") {
+    if (!window.confirm(`确定删除策略“${strategy.name}”吗？此操作不能撤销。`)) return;
+    try {
+      await apiRequest(`/api/strategies/${strategy.id}`, { method: "DELETE" });
+      await loadStrategyLibrary();
+      setLibraryNotice("策略已删除。");
+    } catch (err) {
+      setLibraryNotice(err.message || String(err), true);
+    }
+  }
+}
+
+function strategyAssetIds(strategy) {
+  const config = strategy.config || {};
+  const ids = [];
+  categoryOrder.forEach((category) => {
+    ids.push(...(config.baskets?.[category] || []));
+    if (config.spliceSimulation?.enabled) {
+      ids.push(...(config.spliceSimulation?.baskets?.[category] || []));
+    }
+  });
+  return [...new Set(ids)];
+}
+
+function loadStrategyIntoWorkspace(strategy) {
+  const snapshotMap = new Map(
+    (strategy.assetSnapshots || []).map((asset) => [asset.id, asset]),
+  );
+  const missing = strategyAssetIds(strategy)
+    .filter((id) => !state.assetsById.has(id))
+    .map((id) => snapshotMap.get(id) || { id, name: id, code: id });
+  if (missing.length) {
+    const detail = missing.map((asset) => `${asset.name}（${asset.code}）`).join("\n");
+    window.alert(`以下标的已失效，策略未载入：\n${detail}`);
+    return false;
+  }
+
+  const config = strategy.config;
+  const nextBaskets = {};
+  const nextSpliceBaskets = {};
+  categoryOrder.forEach((category) => {
+    nextBaskets[category] = [...(config.baskets?.[category] || [])];
+    nextSpliceBaskets[category] = [...(config.spliceSimulation?.baskets?.[category] || [])];
+  });
+  state.baskets = nextBaskets;
+  state.spliceBaskets = nextSpliceBaskets;
+  state.stageWeights = cloneWeights(config.stageWeights);
+  state.stageWeightProfile = config.stageWeightProfile === "custom"
+    ? detectStageWeightProfile(state.stageWeights)
+    : String(config.stageWeightProfile || detectStageWeightProfile(state.stageWeights));
+  els.spliceToggle.checked = Boolean(config.spliceSimulation?.enabled);
+  els.ma20Equity.checked = Boolean(config.ma20Controls?.equity);
+  els.ma20Commodity.checked = Boolean(config.ma20Controls?.commodity);
+  renderBaskets();
+  renderSplicePool();
+  els.startDate.value = config.dateRange?.start || "";
+  els.endDate.value = config.dateRange?.end || "";
+  validateDateInputs();
+  updateStageProfileControls();
+  updateStageSettingsButton();
+  state.activeStrategyId = strategy.id;
+  state.result = null;
+  state.lastSuccessfulConfigSignature = null;
+  els.results.classList.add("hidden");
+  updateSaveStrategyState();
+  window.location.hash = "workspace";
+  setStatus(`已载入策略“${strategy.name}”，请重新回测后保存或更新。`, "ok");
+  return true;
+}
+
+function openSaveStrategyModal() {
+  if (els.saveStrategyBtn.disabled) {
+    setStatus("请先完成与当前配置匹配的成功回测。", "error");
+    return;
+  }
+  const strategy = state.strategies.find((item) => item.id === state.activeStrategyId);
+  state.strategyModalMode = "save";
+  state.editingStrategyId = strategy?.id || null;
+  state.selectedStrategyTagIds = new Set(strategy?.tagIds || []);
+  els.strategyModalTitle.textContent = strategy ? "保存策略变更" : "保存策略";
+  els.strategyModalHint.textContent = strategy
+    ? `当前载入策略：${strategy.name}`
+    : "保存当前已完成回测的配置和核心指标。";
+  els.strategyNameInput.value = strategy?.name || `策略 ${new Date().toLocaleDateString("zh-CN")}`;
+  els.strategyNotesInput.value = strategy?.notes || "";
+  els.strategyNotesCount.textContent = `${els.strategyNotesInput.value.length} / 2000`;
+  els.saveAsStrategyBtn.classList.toggle("hidden", !strategy);
+  els.submitStrategyBtn.textContent = strategy ? "更新当前策略" : "保存策略";
+  els.strategyFormError.textContent = "";
+  renderStrategyTagSelector();
+  openModal(els.strategyModal);
+  els.strategyNameInput.focus();
+}
+
+function openMetadataEditor(strategy) {
+  state.strategyModalMode = "metadata";
+  state.editingStrategyId = strategy.id;
+  state.selectedStrategyTagIds = new Set(strategy.tagIds || []);
+  els.strategyModalTitle.textContent = "编辑策略信息";
+  els.strategyModalHint.textContent = "仅修改策略名、标签和备注，不重新运行回测。";
+  els.strategyNameInput.value = strategy.name;
+  els.strategyNotesInput.value = strategy.notes || "";
+  els.strategyNotesCount.textContent = `${els.strategyNotesInput.value.length} / 2000`;
+  els.saveAsStrategyBtn.classList.add("hidden");
+  els.submitStrategyBtn.textContent = "保存元数据";
+  els.strategyFormError.textContent = "";
+  renderStrategyTagSelector();
+  openModal(els.strategyModal);
+  els.strategyNameInput.focus();
+}
+
+function renderStrategyTagSelector() {
+  const selected = state.selectedStrategyTagIds;
+  const sorted = state.tags.slice().sort((a, b) => a.path.localeCompare(b.path, "zh-CN"));
+  if (!sorted.length) {
+    els.strategyTagSelector.innerHTML = `
+      <div class="tag-selector-empty">尚未创建标签，可在策略库的“标签管理”中添加。</div>
+    `;
+    return;
+  }
+  els.strategyTagSelector.innerHTML = sorted.map((tag) => {
+    const checked = selected.has(tag.id);
+    const disabled = !tag.active && !checked;
+    return `
+      <label class="tag-select-row depth-${tag.depth}${tag.active ? "" : " inactive"}">
+        <input type="checkbox" value="${tag.id}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} />
+        <span>${escapeHtml(tag.name)}</span>
+        <small>${escapeHtml(tag.path)}</small>
+      </label>
+    `;
+  }).join("");
+}
+
+function handleStrategyTagSelection(event) {
+  const input = event.target.closest('input[type="checkbox"]');
+  if (!input) return;
+  if (input.checked) {
+    state.selectedStrategyTagIds.add(input.value);
+  } else {
+    state.selectedStrategyTagIds.delete(input.value);
+  }
+  normalizeSelectedStrategyTags();
+  renderStrategyTagSelector();
+}
+
+function normalizeSelectedStrategyTags() {
+  const selected = state.selectedStrategyTagIds;
+  const selectedTags = state.tags.filter((tag) => selected.has(tag.id));
+  selectedTags.forEach((candidate) => {
+    const isAncestor = selectedTags.some(
+      (other) => other.id !== candidate.id && other.pathIds.slice(0, -1).includes(candidate.id),
+    );
+    if (isAncestor) selected.delete(candidate.id);
+  });
+}
+
+async function submitStrategy(forceNew) {
+  const name = els.strategyNameInput.value.trim();
+  if (!name) {
+    els.strategyFormError.textContent = "请输入策略名。";
+    return;
+  }
+  normalizeSelectedStrategyTags();
+  const metadata = {
+    name,
+    notes: els.strategyNotesInput.value.trim(),
+    tagIds: [...state.selectedStrategyTagIds],
+  };
+  const button = forceNew ? els.saveAsStrategyBtn : els.submitStrategyBtn;
+  button.disabled = true;
+  els.strategyFormError.textContent = "";
+  try {
+    let saved;
+    if (state.strategyModalMode === "metadata") {
+      saved = await apiRequest(`/api/strategies/${state.editingStrategyId}`, {
+        method: "PATCH",
+        body: metadata,
+      });
+    } else {
+      if (
+        !state.result
+        || state.lastSuccessfulConfigSignature !== currentConfigSignature()
+      ) {
+        throw new Error("当前配置已变化，请重新回测后再保存。");
+      }
+      const payload = { ...metadata, config: currentConfig() };
+      if (state.editingStrategyId && !forceNew) {
+        saved = await apiRequest(`/api/strategies/${state.editingStrategyId}`, {
+          method: "PUT",
+          body: payload,
+        });
+      } else {
+        saved = await apiRequest("/api/strategies", {
+          method: "POST",
+          body: payload,
+        });
+      }
+      state.activeStrategyId = saved.id;
+    }
+    await loadStrategyLibrary();
+    closeStrategyModal();
+    if (window.location.hash === "#strategies") {
+      setLibraryNotice(`策略“${saved.name}”已保存。`);
+    } else {
+      setStatus(`策略“${saved.name}”已保存。`, "ok");
+    }
+  } catch (err) {
+    els.strategyFormError.textContent = err.message || String(err);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function closeStrategyModal() {
+  els.strategyModal.classList.add("hidden");
+  syncModalBodyState();
+}
+
+function openTagManager() {
+  renderTagManagerTree();
+  els.tagEditorForm.classList.add("hidden");
+  openModal(els.tagManagerModal);
+}
+
+function closeTagManager() {
+  els.tagManagerModal.classList.add("hidden");
+  syncModalBodyState();
+}
+
+function renderTagManagerTree() {
+  if (!els.tagManagerTree) return;
+  const sorted = state.tags.slice().sort((a, b) => a.path.localeCompare(b.path, "zh-CN"));
+  if (!sorted.length) {
+    els.tagManagerTree.innerHTML = `<div class="tag-selector-empty">还没有标签，先新增一个一级标签。</div>`;
+    return;
+  }
+  els.tagManagerTree.innerHTML = sorted.map((tag) => `
+    <div class="tag-manager-row depth-${tag.depth}${tag.active ? "" : " inactive"}">
+      <button type="button" class="tag-manager-main" data-tag-edit="${tag.id}">
+        <span>${escapeHtml(tag.name)}</span>
+        <small>${tag.active ? `第 ${tag.depth} 级` : "已停用"}</small>
+      </button>
+      ${tag.depth < 3 ? `<button type="button" class="tag-child-btn" data-tag-child="${tag.id}">新增下级</button>` : ""}
+    </div>
+  `).join("");
+}
+
+function handleTagManagerAction(event) {
+  const editButton = event.target.closest("[data-tag-edit]");
+  if (editButton) {
+    const tag = state.tags.find((item) => item.id === editButton.dataset.tagEdit);
+    if (tag) showTagEditor(tag, tag.parentId);
+    return;
+  }
+  const childButton = event.target.closest("[data-tag-child]");
+  if (childButton) showTagEditor(null, childButton.dataset.tagChild);
+}
+
+function showTagEditor(tag, parentId) {
+  els.tagEditorForm.classList.remove("hidden");
+  els.tagEditorId.value = tag?.id || "";
+  els.tagNameInput.value = tag?.name || "";
+  els.tagActiveInput.checked = tag?.active ?? true;
+  els.tagActiveRow.classList.toggle("hidden", !tag);
+  els.deleteTagBtn.classList.toggle("hidden", !tag);
+  els.tagEditorError.textContent = "";
+  renderTagParentOptions(tag, parentId);
+  els.tagNameInput.focus();
+}
+
+function renderTagParentOptions(tag, parentId) {
+  const excluded = new Set();
+  if (tag) {
+    state.tags.forEach((candidate) => {
+      if (candidate.pathIds.includes(tag.id)) excluded.add(candidate.id);
+    });
+  }
+  const options = state.tags
+    .filter((candidate) => candidate.depth < 3 && !excluded.has(candidate.id))
+    .sort((a, b) => a.path.localeCompare(b.path, "zh-CN"))
+    .map((candidate) => (
+      `<option value="${candidate.id}">${escapeHtml(candidate.path)}</option>`
+    ))
+    .join("");
+  els.tagParentSelect.innerHTML = `<option value="">无（一级标签）</option>${options}`;
+  els.tagParentSelect.value = parentId || "";
+}
+
+async function saveTagEditor(event) {
+  event.preventDefault();
+  const tagId = els.tagEditorId.value;
+  const payload = {
+    name: els.tagNameInput.value.trim(),
+    parentId: els.tagParentSelect.value || null,
+    active: els.tagActiveInput.checked,
+  };
+  els.tagEditorError.textContent = "";
+  try {
+    await apiRequest(tagId ? `/api/tags/${tagId}` : "/api/tags", {
+      method: tagId ? "PATCH" : "POST",
+      body: payload,
+    });
+    await loadStrategyLibrary();
+    renderTagManagerTree();
+    els.tagEditorForm.classList.add("hidden");
+  } catch (err) {
+    els.tagEditorError.textContent = err.message || String(err);
+  }
+}
+
+async function deleteCurrentTag() {
+  const tagId = els.tagEditorId.value;
+  const tag = state.tags.find((item) => item.id === tagId);
+  if (!tag) return;
+  if (!window.confirm(`确定彻底删除标签“${tag.path}”吗？`)) return;
+  try {
+    await apiRequest(`/api/tags/${tagId}`, { method: "DELETE" });
+    await loadStrategyLibrary();
+    els.tagEditorForm.classList.add("hidden");
+  } catch (err) {
+    els.tagEditorError.textContent = err.message || String(err);
+  }
+}
+
+function openModal(modal) {
+  modal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+}
+
+function syncModalBodyState() {
+  const anyOpen = [...document.querySelectorAll(".modal")].some(
+    (modal) => !modal.classList.contains("hidden"),
+  );
+  document.body.classList.toggle("modal-open", anyOpen);
+}
+
+function setLibraryNotice(text, isError = false) {
+  els.strategyLibraryCount.textContent = text;
+  els.strategyLibraryCount.classList.toggle("error-copy", isError);
+  window.setTimeout(() => {
+    els.strategyLibraryCount.classList.remove("error-copy");
+    renderStrategyCards();
+  }, 2200);
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }

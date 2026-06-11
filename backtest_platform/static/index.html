@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>底层资产回测平台</title>
-    <link rel="stylesheet" href="/styles.css?v=20260611-6" />
+    <link rel="stylesheet" href="/styles.css?v=20260611-7" />
   </head>
   <body>
     <header class="topbar">
@@ -13,7 +13,7 @@
         <h1>底层资产回测平台</h1>
       </div>
       <div class="top-actions">
-        <div class="control-group" aria-label="MA20 + KST 风控设置">
+        <div class="control-group workspace-only" aria-label="MA20 + KST 风控设置">
           <span class="control-title">MA20 + KST 风控</span>
           <label class="check-pill">
             <input id="ma20Equity" type="checkbox" />
@@ -24,7 +24,7 @@
             <span>商品优势</span>
           </label>
         </div>
-        <div class="stage-control-stack">
+        <div class="stage-control-stack workspace-only">
           <button id="stageSettingsBtn" class="ghost-btn" type="button">Stage 比例</button>
           <div class="stage-tilt-control" aria-label="股债倾向">
             <div id="stageProfileSwitch" class="stage-tilt-track"></div>
@@ -35,13 +35,16 @@
             </div>
           </div>
         </div>
-        <button id="clearBtn" class="ghost-btn danger-btn" type="button">清空篮子</button>
-        <button id="resetBtn" class="ghost-btn" type="button">恢复默认</button>
-        <button id="runBtn" class="primary-btn" type="button">运行回测</button>
+        <button id="saveStrategyBtn" class="ghost-btn workspace-only" type="button" disabled>保存策略</button>
+        <button id="strategyLibraryBtn" class="ghost-btn" type="button">策略库</button>
+        <button id="workspaceNavBtn" class="ghost-btn library-only hidden" type="button">返回工作台</button>
+        <button id="clearBtn" class="ghost-btn danger-btn workspace-only" type="button">清空篮子</button>
+        <button id="resetBtn" class="ghost-btn workspace-only" type="button">恢复默认</button>
+        <button id="runBtn" class="primary-btn workspace-only" type="button">运行回测</button>
       </div>
     </header>
 
-    <main class="shell">
+    <main id="workspaceView" class="shell">
       <aside class="library-panel">
         <div class="panel-head">
           <div>
@@ -229,6 +232,24 @@
       </section>
     </main>
 
+    <main id="strategyLibraryView" class="strategy-library-view hidden">
+      <section class="strategy-library-head">
+        <div>
+          <p class="eyebrow">Saved Strategies</p>
+          <h2>策略库</h2>
+          <p id="strategyLibraryCount" class="muted-copy">正在读取已保存策略...</p>
+        </div>
+        <button id="tagManagerBtn" class="ghost-btn" type="button">标签管理</button>
+      </section>
+      <section class="strategy-toolbar">
+        <input id="strategySearchInput" class="search" type="search" placeholder="搜索策略名、标签或备注" />
+        <select id="strategyTagFilter" class="select-control">
+          <option value="">全部标签</option>
+        </select>
+      </section>
+      <section id="strategyCards" class="strategy-card-grid"></section>
+    </main>
+
     <div id="stageSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="stageSettingsTitle">
       <section class="modal-dialog">
         <header class="modal-head">
@@ -260,6 +281,77 @@
       </section>
     </div>
 
-    <script src="/app.js?v=20260611-6"></script>
+    <div id="strategyModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="strategyModalTitle">
+      <section class="modal-dialog strategy-modal-dialog">
+        <header class="modal-head">
+          <div>
+            <h2 id="strategyModalTitle">保存策略</h2>
+            <p id="strategyModalHint" class="modal-subtitle"></p>
+          </div>
+          <button id="closeStrategyModalBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button>
+        </header>
+        <div class="form-stack">
+          <label class="field-label">
+            <span>策略名</span>
+            <input id="strategyNameInput" class="text-control" type="text" maxlength="120" />
+          </label>
+          <div class="field-label">
+            <span>特征标签（最多三级，可选多条路径）</span>
+            <div id="strategyTagSelector" class="tag-selector"></div>
+          </div>
+          <label class="field-label">
+            <span>备注</span>
+            <textarea id="strategyNotesInput" class="text-control" maxlength="2000" rows="6" placeholder="记录策略思路、适用场景或后续观察事项"></textarea>
+            <small id="strategyNotesCount">0 / 2000</small>
+          </label>
+          <p id="strategyFormError" class="form-error"></p>
+        </div>
+        <footer class="modal-actions">
+          <button id="cancelStrategyModalBtn" class="ghost-btn" type="button">取消</button>
+          <button id="saveAsStrategyBtn" class="ghost-btn" type="button">另存为新策略</button>
+          <button id="submitStrategyBtn" class="primary-btn" type="button">保存</button>
+        </footer>
+      </section>
+    </div>
+
+    <div id="tagManagerModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="tagManagerTitle">
+      <section class="modal-dialog tag-manager-dialog">
+        <header class="modal-head">
+          <div>
+            <h2 id="tagManagerTitle">标签管理</h2>
+            <p class="modal-subtitle">维护全局三级标签树；停用后历史策略仍会保留标签。</p>
+          </div>
+          <button id="closeTagManagerBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button>
+        </header>
+        <div class="tag-manager-layout">
+          <div>
+            <div id="tagManagerTree" class="tag-manager-tree"></div>
+            <button id="addRootTagBtn" class="ghost-btn" type="button">新增一级标签</button>
+          </div>
+          <form id="tagEditorForm" class="tag-editor hidden">
+            <input id="tagEditorId" type="hidden" />
+            <label class="field-label">
+              <span>标签名称</span>
+              <input id="tagNameInput" class="text-control" type="text" maxlength="60" required />
+            </label>
+            <label class="field-label">
+              <span>上级标签</span>
+              <select id="tagParentSelect" class="select-control"></select>
+            </label>
+            <label id="tagActiveRow" class="check-pill">
+              <input id="tagActiveInput" type="checkbox" checked />
+              <span>允许用于新策略</span>
+            </label>
+            <p id="tagEditorError" class="form-error"></p>
+            <div class="tag-editor-actions">
+              <button id="deleteTagBtn" class="ghost-btn danger-btn" type="button">彻底删除</button>
+              <button class="primary-btn" type="submit">保存标签</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <script src="/app.js?v=20260611-7"></script>
   </body>
 </html>

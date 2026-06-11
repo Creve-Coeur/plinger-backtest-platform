@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -636,6 +639,197 @@ class BacktestIntegrationTests(unittest.TestCase):
         ]
         self.assertTrue(convertible_events)
         self.assertTrue(all(log["riskTier"] == 0.70 for log in convertible_events))
+
+
+class StrategyStoreTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        server.store.ensure_loaded()
+
+    def setUp(self) -> None:
+        self.temp_dir = TemporaryDirectory()
+        self.strategy_store = server.StrategyStore(
+            Path(self.temp_dir.name) / "saved_strategies.json"
+        )
+        self.config = {
+            "baskets": server.store.default_selection(),
+            "spliceSimulation": {"enabled": False, "baskets": {}},
+            "ma20Controls": {"equity": True, "commodity": False},
+            "dateRange": {"start": "2023-01-01", "end": "2024-12-31"},
+            "stageWeights": server.default_stage_weights(),
+            "stageWeightProfile": "3",
+        }
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def fake_run(self, raw_config):
+        config = self.strategy_store._normalize_config(raw_config)
+        snapshots = []
+        for asset_id in self.strategy_store._asset_ids(config):
+            meta = server.store.meta[asset_id]
+            snapshots.append(
+                {
+                    "id": meta.id,
+                    "code": meta.code,
+                    "name": meta.name,
+                    "module": meta.module,
+                    "category": meta.category,
+                }
+            )
+        return (
+            config,
+            snapshots,
+            {
+                "runAt": "2026-06-11T00:00:00Z",
+                "window": {"start": "2023-01-03", "end": "2024-12-31", "days": 480},
+                "totalReturn": 0.2,
+                "annualReturn": 0.1,
+                "maxDrawdown": -0.08,
+                "sharpe": 1.1,
+            },
+        )
+
+    def create_strategy(self, name="测试策略", tag_ids=None):
+        with patch.object(
+            self.strategy_store,
+            "_run_and_snapshot",
+            side_effect=self.fake_run,
+        ):
+            return self.strategy_store.create_strategy(
+                {
+                    "name": name,
+                    "notes": "持久化测试",
+                    "tagIds": tag_ids or [],
+                    "config": self.config,
+                }
+            )
+
+    def test_strategy_crud_duplicate_and_restart_persistence(self) -> None:
+        created = self.create_strategy()
+        with self.assertRaises(server.ApiError):
+            self.create_strategy("测试策略".upper())
+
+        duplicate = self.strategy_store.duplicate_strategy(created["id"], {})
+        self.assertEqual(duplicate["name"], "测试策略 - 副本")
+        updated = self.strategy_store.update_metadata(
+            created["id"],
+            {"name": "更新后的策略", "notes": "新备注", "tagIds": []},
+        )
+        self.assertEqual(updated["notes"], "新备注")
+
+        restarted = server.StrategyStore(self.strategy_store.path)
+        self.assertEqual(len(restarted.list_all()["strategies"]), 2)
+        restarted.delete_strategy(duplicate["id"])
+        self.assertEqual(
+            [item["name"] for item in restarted.list_all()["strategies"]],
+            ["更新后的策略"],
+        )
+
+    def test_three_level_tags_selection_and_parent_filter_paths(self) -> None:
+        root = self.strategy_store.create_tag({"name": "风格"})
+        child = self.strategy_store.create_tag(
+            {"name": "偏股", "parentId": root["id"]}
+        )
+        leaf = self.strategy_store.create_tag(
+            {"name": "高弹性", "parentId": child["id"]}
+        )
+        with self.assertRaises(server.ApiError):
+            self.strategy_store.create_tag(
+                {"name": "第四级", "parentId": leaf["id"]}
+            )
+        with self.assertRaises(server.ApiError):
+            self.strategy_store.create_tag(
+                {"name": "高弹性", "parentId": child["id"]}
+            )
+
+        strategy = self.create_strategy(
+            tag_ids=[root["id"], child["id"], leaf["id"]]
+        )
+        self.assertEqual(strategy["tagIds"], [leaf["id"]])
+        self.assertEqual(strategy["tagPaths"][0]["pathIds"], [
+            root["id"],
+            child["id"],
+            leaf["id"],
+        ])
+
+    def test_tag_move_cycle_deactivate_and_delete_guards(self) -> None:
+        root = self.strategy_store.create_tag({"name": "周期"})
+        child = self.strategy_store.create_tag(
+            {"name": "复苏", "parentId": root["id"]}
+        )
+        with self.assertRaises(server.ApiError):
+            self.strategy_store.update_tag(
+                root["id"],
+                {"parentId": child["id"]},
+            )
+
+        inactive = self.strategy_store.update_tag(
+            child["id"],
+            {"active": False},
+        )
+        self.assertFalse(inactive["active"])
+        with self.assertRaises(server.ApiError):
+            self.create_strategy(tag_ids=[child["id"]])
+
+        self.strategy_store.update_tag(child["id"], {"active": True})
+        self.create_strategy(tag_ids=[child["id"]])
+        with self.assertRaises(server.ApiError):
+            self.strategy_store.delete_tag(child["id"])
+        with self.assertRaises(server.ApiError):
+            self.strategy_store.delete_tag(root["id"])
+
+    def test_corrupt_file_is_not_overwritten(self) -> None:
+        self.strategy_store.path.write_text("{broken", encoding="utf-8")
+        before = self.strategy_store.path.read_text(encoding="utf-8")
+        with self.assertRaises(server.ApiError):
+            self.strategy_store.create_tag({"name": "不会写入"})
+        self.assertEqual(
+            self.strategy_store.path.read_text(encoding="utf-8"),
+            before,
+        )
+
+    def test_rerun_updates_saved_summary_and_returns_result(self) -> None:
+        strategy = self.create_strategy()
+        result = {
+            "window": {"start": "2023-01-03", "end": "2024-12-31", "days": 480},
+            "metrics": [
+                {
+                    "totalReturn": 0.35,
+                    "annualReturn": 0.16,
+                    "maxDrawdown": -0.09,
+                    "sharpe": 1.35,
+                }
+            ],
+        }
+        with patch.object(server, "run_backtest", return_value=result):
+            rerun = self.strategy_store.rerun_strategy(strategy["id"])
+        self.assertEqual(rerun["result"], result)
+        self.assertEqual(rerun["strategy"]["summary"]["totalReturn"], 0.35)
+        self.assertEqual(
+            self.strategy_store.list_all()["strategies"][0]["summary"]["sharpe"],
+            1.35,
+        )
+
+    def test_missing_assets_are_reported_without_losing_snapshot(self) -> None:
+        strategy = self.create_strategy()
+        data = self.strategy_store._read_unlocked()
+        target = data["strategies"][0]
+        missing_id = "index:MISSING.TEST"
+        target["config"]["baskets"]["equity"].append(missing_id)
+        target["assetSnapshots"].append(
+            {
+                "id": missing_id,
+                "code": "MISSING.TEST",
+                "name": "失效测试标的",
+                "module": "index",
+                "category": "equity",
+            }
+        )
+        self.strategy_store._write_unlocked(data)
+        loaded = self.strategy_store.list_all()["strategies"][0]
+        self.assertEqual(loaded["id"], strategy["id"])
+        self.assertEqual(loaded["missingAssets"][0]["name"], "失效测试标的")
 
 
 def make_pring(rows: list[tuple[str, int]]) -> pd.DataFrame:

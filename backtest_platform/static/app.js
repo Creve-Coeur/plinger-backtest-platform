@@ -230,6 +230,7 @@ function renderAssets() {
       asset.roleLabel,
       asset.fullLabel,
       asset.cluster,
+      basketLabels[asset.category],
     ]
       .filter(Boolean)
       .join(" ")
@@ -237,7 +238,15 @@ function renderAssets() {
     return !query || haystack.includes(query);
   });
 
-  els.assetCount.textContent = `${moduleLabels[state.activeTab]} ${assets.length} 个标的`;
+  const breakdown = categoryOrder
+    .map((category) => {
+      const count = assets.filter((asset) => asset.category === category).length;
+      return count ? `${basketLabels[category]} ${count}` : "";
+    })
+    .filter(Boolean)
+    .join(" · ");
+  els.assetCount.textContent =
+    `${moduleLabels[state.activeTab]} ${assets.length} 个标的${breakdown ? ` · ${breakdown}` : ""}`;
 
   if (!assets.length) {
     els.assetList.innerHTML = `<div class="empty-state">${state.activeTab === "enhanced" ? "增强模块等待接入数据" : "没有匹配的标的"}</div>`;
@@ -245,7 +254,8 @@ function renderAssets() {
   }
 
   els.assetList.innerHTML = "";
-  assets.forEach((asset) => {
+
+  const appendAsset = (asset) => {
     const card = document.createElement("div");
     card.className = "asset-card";
     card.draggable = true;
@@ -253,7 +263,10 @@ function renderAssets() {
     card.innerHTML = `
       <div class="asset-name">
         <span>${escapeHtml(asset.name)}</span>
-        <span class="module-pill">${moduleLabels[asset.module]}</span>
+        <span class="asset-pills">
+          ${asset.category ? `<span class="category-pill category-${asset.category}">${basketLabels[asset.category]}</span>` : ""}
+          <span class="module-pill">${moduleLabels[asset.module]}</span>
+        </span>
       </div>
       <div class="asset-code">${escapeHtml(asset.code)}${asset.manager ? ` · ${escapeHtml(asset.manager)}` : ""}</div>
       ${
@@ -272,6 +285,21 @@ function renderAssets() {
     });
     card.addEventListener("dragend", () => card.classList.remove("dragging"));
     els.assetList.appendChild(card);
+  };
+
+  if (state.activeTab === "manager") {
+    assets.forEach(appendAsset);
+    return;
+  }
+
+  categoryOrder.forEach((category) => {
+    const categoryAssets = assets.filter((asset) => asset.category === category);
+    if (!categoryAssets.length) return;
+    const heading = document.createElement("div");
+    heading.className = `asset-section-title category-${category}`;
+    heading.innerHTML = `<span>${basketLabels[category]}</span><strong>${categoryAssets.length}</strong>`;
+    els.assetList.appendChild(heading);
+    categoryAssets.forEach(appendAsset);
   });
 }
 

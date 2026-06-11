@@ -37,6 +37,14 @@ CATEGORY_LABELS = {
     "pure_bond": "纯债",
 }
 CATEGORY_PRIORITY = ("equity", "commodity", "convertible", "pure_bond")
+PRICE_COLUMNS = (
+    "收盘价(元)",
+    "复权净值(元)",
+    "复权净值",
+    "累计净值（分红再投资）",
+    "累计净值",
+    "单位净值",
+)
 
 STAGE_DOMINANT = {
     1: "convertible",
@@ -74,6 +82,7 @@ class AssetMeta:
     start: str
     end: str
     count: int
+    category: str | None = None
     manager: str | None = None
     roleLabel: str | None = None
     fullLabel: str | None = None
@@ -124,6 +133,7 @@ class DataStore:
         code: str,
         name: str,
         series: pd.Series,
+        category: str | None = None,
         manager: str | None = None,
         role_label: str | None = None,
         full_label: str | None = None,
@@ -147,6 +157,7 @@ class DataStore:
             start=series.index.min().strftime("%Y-%m-%d"),
             end=series.index.max().strftime("%Y-%m-%d"),
             count=int(series.count()),
+            category=category,
             manager=manager,
             roleLabel=role_label,
             fullLabel=full_label,
@@ -154,22 +165,7 @@ class DataStore:
         )
 
     def _load_funds(self) -> None:
-        if not FUND_DIR.exists():
-            return
-        for file in sorted(FUND_DIR.glob("*.xlsx")):
-            xl = pd.ExcelFile(file)
-            for sheet in xl.sheet_names:
-                df = pd.read_excel(file, sheet_name=sheet)
-                if not {"代码", "简称", "时间", "收盘价(元)"}.issubset(df.columns):
-                    continue
-                code = first_text(df["代码"], sheet)
-                name = first_text(df["简称"], code)
-                series = pd.Series(
-                    pd.to_numeric(df["收盘价(元)"], errors="coerce").values,
-                    index=pd.to_datetime(df["时间"], errors="coerce"),
-                    name=f"fund:{code}",
-                )
-                self._register_asset("fund", code, name, series)
+        self._load_standard_library(FUND_DIR, "fund")
 
     def _load_fund_managers(self) -> None:
         if not FUND_MANAGER_DIR.exists():
@@ -232,71 +228,112 @@ class DataStore:
             )
 
     def _load_indexes(self) -> None:
-        if not INDEX_DIR.exists():
-            return
-        for file in sorted(INDEX_DIR.glob("*.xlsx")):
-            xl = pd.ExcelFile(file)
-            for sheet in xl.sheet_names:
-                raw = pd.read_excel(file, sheet_name=sheet)
-                if raw.shape[0] < 3 or raw.shape[1] < 2:
-                    continue
-                date_col = raw.columns[0]
-                dates = pd.to_datetime(raw.iloc[2:][date_col], errors="coerce")
-                if dates.notna().sum() < 3:
-                    continue
-                names = raw.iloc[0]
-                data = raw.iloc[2:].copy()
-                for code in raw.columns[1:]:
-                    values = (
-                        data[code]
-                        .replace(["空", "--", "-", ""], pd.NA)
-                        .pipe(pd.to_numeric, errors="coerce")
-                    )
-                    series = pd.Series(values.values, index=dates, name=f"index:{code}")
-                    name = str(names.get(code, code)).strip()
-                    if name.lower() == "nan" or not name:
-                        name = str(code)
-                    self._register_asset("index", str(code), name, series)
+        self._load_standard_library(INDEX_DIR, "index")
 
     def _load_enhanced(self) -> None:
-        # The enhanced library is intentionally optional. Future files can use
-        # either the fund-like multi-sheet shape or the index-like wide shape.
         if not ENHANCED_DIR.exists():
             return
-        for file in sorted(ENHANCED_DIR.glob("*.xlsx")):
-            try:
-                xl = pd.ExcelFile(file)
-                if len(xl.sheet_names) > 1:
-                    for sheet in xl.sheet_names:
-                        df = pd.read_excel(file, sheet_name=sheet)
-                        if {"代码", "简称", "时间", "收盘价(元)"}.issubset(df.columns):
-                            code = first_text(df["代码"], sheet)
-                            name = first_text(df["简称"], code)
-                            series = pd.Series(
-                                pd.to_numeric(df["收盘价(元)"], errors="coerce").values,
-                                index=pd.to_datetime(df["时间"], errors="coerce"),
-                                name=f"enhanced:{code}",
-                            )
-                            self._register_asset("enhanced", code, name, series)
-                else:
-                    raw = pd.read_excel(file, sheet_name=xl.sheet_names[0])
-                    if raw.shape[0] >= 3 and raw.shape[1] >= 2:
-                        date_col = raw.columns[0]
-                        dates = pd.to_datetime(raw.iloc[2:][date_col], errors="coerce")
-                        names = raw.iloc[0]
-                        data = raw.iloc[2:].copy()
-                        if dates.notna().sum() >= 3:
-                            for code in raw.columns[1:]:
-                                values = (
-                                    data[code]
-                                    .replace(["空", "--", "-", ""], pd.NA)
-                                    .pipe(pd.to_numeric, errors="coerce")
-                                )
-                                series = pd.Series(values.values, index=dates, name=f"enhanced:{code}")
-                                name = str(names.get(code, code)).strip()
-                                self._register_asset("enhanced", str(code), name, series)
-            except Exception:
+        for category in CATEGORY_PRIORITY:
+            category_dir = ENHANCED_DIR / CATEGORY_LABELS[category]
+            if not category_dir.exists():
                 continue
+            for file in sorted(category_dir.glob("*.xlsx")):
+                try:
+                    self._load_enhanced_workbook(file, category)
+                except Exception as exc:
+                    raise ValueError(f"增强数据读取失败：{file.name}：{exc}") from exc
+
+    def _load_standard_library(self, directory: Path, module: str) -> None:
+        if not directory.exists():
+            return
+        for category in CATEGORY_PRIORITY:
+            category_dir = directory / CATEGORY_LABELS[category]
+            if not category_dir.exists():
+                continue
+            for file in sorted(category_dir.glob("*.xlsx")):
+                with pd.ExcelFile(file) as workbook:
+                    for sheet in workbook.sheet_names:
+                        df = pd.read_excel(workbook, sheet_name=sheet)
+                        self._register_standard_sheet(module, category, sheet, df)
+
+    def _register_standard_sheet(
+        self,
+        module: str,
+        category: str,
+        sheet: str,
+        df: pd.DataFrame,
+    ) -> bool:
+        price_column = next((column for column in PRICE_COLUMNS if column in df.columns), None)
+        if price_column is None or not {"代码", "简称", "时间"}.issubset(df.columns):
+            return False
+        code = first_text(df["代码"], sheet)
+        name = first_text(df["简称"], code)
+        series = pd.Series(
+            pd.to_numeric(df[price_column], errors="coerce").values,
+            index=parse_excel_dates(df["时间"]),
+            name=f"{module}:{code}",
+        )
+        self._register_asset(module, code, name, series, category=category)
+        return True
+
+    def _load_enhanced_workbook(self, file: Path, category: str) -> None:
+        with pd.ExcelFile(file) as workbook:
+            if "净值序列" in workbook.sheet_names:
+                nav = pd.read_excel(workbook, sheet_name="净值序列")
+                if {"基金简称", "净值日期"}.issubset(nav.columns):
+                    value_column = next(
+                        (column for column in PRICE_COLUMNS if column in nav.columns),
+                        None,
+                    )
+                    if value_column is not None:
+                        for name, group in nav.groupby("基金简称", sort=False):
+                            product_name = str(name).strip()
+                            if not product_name or product_name.lower() == "nan":
+                                continue
+                            series = pd.Series(
+                                pd.to_numeric(group[value_column], errors="coerce").values,
+                                index=parse_excel_dates(group["净值日期"]),
+                                name=f"enhanced:{product_name}",
+                            )
+                            self._register_asset(
+                                "enhanced",
+                                product_name,
+                                product_name,
+                                series,
+                                category=category,
+                            )
+                        return
+
+            loaded = 0
+            for sheet in workbook.sheet_names:
+                if sheet in {"合并长表", "汇总说明", "产品清单"}:
+                    continue
+                df = pd.read_excel(workbook, sheet_name=sheet)
+                if self._register_standard_sheet("enhanced", category, sheet, df):
+                    loaded += 1
+                    continue
+
+                raw = pd.read_excel(workbook, sheet_name=sheet, header=None)
+                header = find_nav_header(raw)
+                if header is None:
+                    continue
+                header_row, date_col, value_col = header
+                values = raw.iloc[header_row + 1 :]
+                series = pd.Series(
+                    pd.to_numeric(values.iloc[:, value_col], errors="coerce").values,
+                    index=parse_excel_dates(values.iloc[:, date_col]),
+                    name=f"enhanced:{sheet}",
+                )
+                self._register_asset(
+                    "enhanced",
+                    sheet,
+                    sheet,
+                    series,
+                    category=category,
+                )
+                loaded += 1
+            if loaded == 0:
+                raise ValueError("未识别到可用净值序列")
 
     def _load_pring(self) -> pd.DataFrame:
         candidates = [STRATEGY_DIR / PRING_FILE_NAME]
@@ -342,7 +379,16 @@ class DataStore:
     def grouped_assets(self) -> dict[str, Any]:
         self.ensure_loaded()
         groups = {"fund": [], "manager": [], "index": [], "enhanced": []}
-        for meta in sorted(self.meta.values(), key=lambda x: (x.module, x.name, x.code)):
+        category_rank = {category: index for index, category in enumerate(CATEGORY_PRIORITY)}
+        for meta in sorted(
+            self.meta.values(),
+            key=lambda x: (
+                x.module,
+                category_rank.get(x.category or "", len(category_rank)),
+                x.name,
+                x.code,
+            ),
+        ):
             groups.setdefault(meta.module, []).append(meta.__dict__)
         return {
             "groups": groups,
@@ -388,6 +434,37 @@ def first_text(series: pd.Series, fallback: str) -> str:
         return str(fallback)
     text = str(vals.iloc[0]).strip()
     return text or str(fallback)
+
+
+def parse_excel_dates(series: pd.Series) -> pd.Series:
+    parsed = pd.to_datetime(series, errors="coerce")
+    numeric = pd.to_numeric(series, errors="coerce")
+    excel_serial = numeric.between(20000, 80000)
+    if excel_serial.any():
+        parsed = pd.Series(parsed, index=series.index)
+        parsed.loc[excel_serial] = (
+            pd.Timestamp("1899-12-30")
+            + pd.to_timedelta(numeric.loc[excel_serial], unit="D")
+        )
+    return parsed
+
+
+def find_nav_header(raw: pd.DataFrame) -> tuple[int, int, int] | None:
+    for row_index in range(min(12, len(raw))):
+        cells = [str(value).strip() if not pd.isna(value) else "" for value in raw.iloc[row_index]]
+        if "净值日期" not in cells:
+            continue
+        value_column = next(
+            (
+                cells.index(column)
+                for column in PRICE_COLUMNS
+                if column in cells
+            ),
+            None,
+        )
+        if value_column is not None:
+            return row_index, cells.index("净值日期"), value_column
+    return None
 
 
 def text_or_none(value: Any) -> str | None:

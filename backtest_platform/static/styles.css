@@ -319,6 +319,33 @@ h3 {
   line-height: 1.35;
 }
 
+.asset-pills {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.asset-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 4px 0 8px;
+  padding: 7px 9px;
+  border-left: 3px solid var(--blue);
+  background: #f5f8fa;
+  color: #435363;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.asset-section-title:not(:first-child) {
+  margin-top: 14px;
+}
+
+.asset-section-title strong {
+  font-size: 11px;
+}
+
 .asset-code {
   margin-top: 6px;
   color: var(--muted);
@@ -384,6 +411,37 @@ h3 {
   background: #eef4f8;
   color: var(--blue);
   font-size: 11px;
+}
+
+.category-pill {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.category-equity {
+  border-color: #d98484;
+  background: #faeeee;
+  color: #a63434;
+}
+
+.category-commodity {
+  border-color: #d6b45e;
+  background: #fbf5e5;
+  color: #8a6510;
+}
+
+.category-convertible {
+  border-color: #b39bd0;
+  background: #f4eff9;
+  color: #65438f;
+}
+
+.category-pure_bond {
+  border-color: #8eafc6;
+  background: #edf4f8;
+  color: #3e6d8c;
 }
 
 .workspace {

@@ -36,6 +36,36 @@ class PringStageTests(unittest.TestCase):
             },
         )
 
+    def test_asset_libraries_are_loaded_from_category_folders(self) -> None:
+        assets_by_module = {
+            module: [meta for meta in server.store.meta.values() if meta.module == module]
+            for module in ("fund", "index", "enhanced")
+        }
+        self.assertEqual(len(assets_by_module["fund"]), 18)
+        self.assertEqual(len(assets_by_module["index"]), 20)
+        self.assertEqual(len(assets_by_module["enhanced"]), 163)
+
+        expected_counts = {
+            "fund": {"equity": 7, "commodity": 4, "convertible": 1, "pure_bond": 6},
+            "index": {"equity": 13, "commodity": 1, "convertible": 1, "pure_bond": 5},
+            "enhanced": {"equity": 150, "commodity": 3, "convertible": 10},
+        }
+        for module, category_counts in expected_counts.items():
+            for category, count in category_counts.items():
+                self.assertEqual(
+                    sum(meta.category == category for meta in assets_by_module[module]),
+                    count,
+                )
+
+        self.assertEqual(
+            server.store.meta["enhanced:000297.OF"].name,
+            "鹏华可转债债券A",
+        )
+        self.assertEqual(
+            server.store.meta["enhanced:000297.OF"].category,
+            "convertible",
+        )
+
     def test_fund_manager_assets_and_labels_are_loaded(self) -> None:
         manager_assets = [
             meta for meta in server.store.meta.values() if meta.module == "manager"

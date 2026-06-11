@@ -65,6 +65,49 @@ DEFAULT_STAGE_WEIGHTS = {
     for stage, dominant in STAGE_DOMINANT.items()
 }
 
+STAGE_WEIGHT_PROFILE_SPECS = {
+    "1": {
+        "label": "第一档",
+        "shortLabel": "强偏股",
+        "description": "优势资产45% + 股票35%，其余资产均分",
+        "dominantWeight": 0.45,
+        "tiltCategory": "equity",
+        "tiltWeight": 0.35,
+    },
+    "2": {
+        "label": "第二档",
+        "shortLabel": "偏股",
+        "description": "优势资产55% + 股票25%，其余资产均分",
+        "dominantWeight": 0.55,
+        "tiltCategory": "equity",
+        "tiltWeight": 0.25,
+    },
+    "3": {
+        "label": "第三档",
+        "shortLabel": "均衡",
+        "description": "优势资产70%，其余三类各10%",
+        "dominantWeight": 0.70,
+        "tiltCategory": None,
+        "tiltWeight": 0.0,
+    },
+    "4": {
+        "label": "第四档",
+        "shortLabel": "偏债",
+        "description": "优势资产55% + 纯债25%，其余资产均分",
+        "dominantWeight": 0.55,
+        "tiltCategory": "pure_bond",
+        "tiltWeight": 0.25,
+    },
+    "5": {
+        "label": "第五档",
+        "shortLabel": "强偏债",
+        "description": "优势资产45% + 纯债35%，其余资产均分",
+        "dominantWeight": 0.45,
+        "tiltCategory": "pure_bond",
+        "tiltWeight": 0.35,
+    },
+}
+
 KST_COMPONENTS = (
     (20, 10, 1),
     (60, 20, 2),
@@ -394,6 +437,7 @@ class DataStore:
             "groups": groups,
             "defaults": self.default_selection(),
             "defaultStageWeights": default_stage_weights(),
+            "stageWeightProfiles": stage_weight_profiles(),
             "pring": self.pring_summary(),
         }
 
@@ -677,6 +721,44 @@ def default_stage_weights() -> dict[str, dict[str, float]]:
     return {
         str(stage): dict(weights)
         for stage, weights in DEFAULT_STAGE_WEIGHTS.items()
+    }
+
+
+def build_stage_weight_profile(level: str | int) -> dict[str, dict[str, float]]:
+    level_key = str(level)
+    if level_key not in STAGE_WEIGHT_PROFILE_SPECS:
+        raise ValueError(f"未知股债倾向档位: {level}")
+    spec = STAGE_WEIGHT_PROFILE_SPECS[level_key]
+    dominant_weight = float(spec["dominantWeight"])
+    tilt_category = spec["tiltCategory"]
+    tilt_weight = float(spec["tiltWeight"])
+    residual = 1.0 - dominant_weight - tilt_weight
+
+    profile: dict[str, dict[str, float]] = {}
+    for stage, dominant in STAGE_DOMINANT.items():
+        weights = {category: 0.0 for category in CATEGORY_PRIORITY}
+        weights[dominant] += dominant_weight
+        reserved = {dominant}
+        if tilt_category is not None:
+            weights[str(tilt_category)] += tilt_weight
+            reserved.add(str(tilt_category))
+        remaining = [category for category in CATEGORY_PRIORITY if category not in reserved]
+        equal_weight = round(residual / len(remaining), 12)
+        for category in remaining:
+            weights[category] = equal_weight
+        profile[str(stage)] = weights
+    return profile
+
+
+def stage_weight_profiles() -> dict[str, dict[str, Any]]:
+    return {
+        level: {
+            "label": spec["label"],
+            "shortLabel": spec["shortLabel"],
+            "description": spec["description"],
+            "weights": build_stage_weight_profile(level),
+        }
+        for level, spec in STAGE_WEIGHT_PROFILE_SPECS.items()
     }
 
 

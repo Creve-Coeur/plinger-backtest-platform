@@ -79,9 +79,128 @@ h3 {
 
 .top-actions {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.stage-control-stack {
+  display: grid;
+  width: 210px;
+  gap: 5px;
+}
+
+.stage-control-stack > .ghost-btn {
+  width: 100%;
+}
+
+.stage-control-stack > .ghost-btn.tilt-bond {
+  border-color: #8fc1a7;
+  background: #f0f8f4;
+  color: #286348;
+}
+
+.stage-control-stack > .ghost-btn.tilt-neutral {
+  border-color: #d8bd69;
+  background: #fcf8e9;
+  color: #806318;
+}
+
+.stage-control-stack > .ghost-btn.tilt-equity {
+  border-color: #dfa0a0;
+  background: #fcf1f1;
+  color: #a23838;
+}
+
+.stage-tilt-control {
+  padding: 0 8px;
+}
+
+.stage-tilt-track {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  align-items: center;
+  height: 20px;
+}
+
+.stage-tilt-track::before {
+  content: "";
+  position: absolute;
+  right: 10%;
+  left: 10%;
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #2f7652 0%, #85aa5c 25%, #d2a72e 50%, #d87a65 75%, #bd4141 100%);
+  box-shadow: inset 0 0 0 1px rgba(23, 32, 42, 0.08);
+}
+
+.stage-tilt-point {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-self: center;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.stage-tilt-point span {
+  width: 12px;
+  height: 12px;
+  border: 2px solid white;
+  border-radius: 50%;
+  background: var(--point-color);
+  box-shadow: 0 0 0 1px rgba(23, 32, 42, 0.2);
+  transition: width 0.15s ease, height 0.15s ease, box-shadow 0.15s ease;
+}
+
+.stage-tilt-point:hover span {
+  width: 15px;
+  height: 15px;
+}
+
+.stage-tilt-point.active span {
+  width: 17px;
+  height: 17px;
+  box-shadow: 0 0 0 3px white, 0 0 0 5px var(--point-color);
+}
+
+.stage-tilt-point.level-5 {
+  --point-color: #2f7652;
+}
+
+.stage-tilt-point.level-4 {
+  --point-color: #75a45b;
+}
+
+.stage-tilt-point.level-3 {
+  --point-color: #d2a72e;
+}
+
+.stage-tilt-point.level-2 {
+  --point-color: #d87a65;
+}
+
+.stage-tilt-point.level-1 {
+  --point-color: #bd4141;
+}
+
+.stage-tilt-track.custom .stage-tilt-point span {
+  opacity: 0.55;
+}
+
+.stage-tilt-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 1px;
+  color: #77838e;
+  font-size: 10px;
+  line-height: 1;
 }
 
 .control-group {
@@ -227,9 +346,9 @@ h3 {
 
 .library-panel {
   position: sticky;
-  top: 92px;
+  top: 120px;
   align-self: start;
-  height: calc(100vh - 112px);
+  height: calc(100vh - 140px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -329,21 +448,52 @@ h3 {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
   margin: 4px 0 8px;
   padding: 7px 9px;
+  border: 0;
   border-left: 3px solid var(--blue);
   background: #f5f8fa;
   color: #435363;
+  cursor: pointer;
   font-size: 12px;
   font-weight: 700;
+  text-align: left;
 }
 
-.asset-section-title:not(:first-child) {
+.asset-section:not(:first-child) .asset-section-title {
   margin-top: 14px;
+}
+
+.asset-section-title:hover {
+  filter: brightness(0.98);
+}
+
+.asset-section-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.collapse-chevron {
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg) translate(-1px, -1px);
+  transition: transform 0.15s ease;
+}
+
+.asset-section.collapsed .collapse-chevron {
+  transform: rotate(-45deg);
 }
 
 .asset-section-title strong {
   font-size: 11px;
+}
+
+.asset-section-body[hidden] {
+  display: none;
 }
 
 .asset-code {
@@ -766,6 +916,8 @@ h3 {
 .modal-dialog {
   width: min(1040px, 100%);
   max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -787,7 +939,8 @@ h3 {
 }
 
 .stage-weight-wrap {
-  max-height: calc(100vh - 190px);
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 14px 16px;
   overflow: auto;
 }
@@ -1276,6 +1429,10 @@ tr:last-child td {
     display: grid;
   }
 
+  .stage-control-stack {
+    width: 100%;
+  }
+
   .control-group {
     align-items: flex-start;
     flex-direction: column;
@@ -1308,7 +1465,7 @@ tr:last-child td {
   }
 
   .stage-weight-wrap {
-    max-height: calc(100vh - 224px);
+    max-height: calc(100vh - 150px);
     padding: 10px;
   }
 

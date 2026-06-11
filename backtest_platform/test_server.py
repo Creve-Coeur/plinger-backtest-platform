@@ -97,6 +97,52 @@ class PringStageTests(unittest.TestCase):
             self.assertAlmostEqual(sum(weights.values()), 1.0)
             self.assertTrue(all(value == 0.10 for key, value in weights.items() if key != dominant))
 
+    def test_five_stage_weight_profiles_form_equity_to_bond_ladder(self) -> None:
+        profiles = server.stage_weight_profiles()
+        self.assertEqual(list(profiles), ["1", "2", "3", "4", "5"])
+        self.assertEqual(profiles["3"]["weights"], server.default_stage_weights())
+
+        level_one_equity_stage = profiles["1"]["weights"]["2"]
+        self.assertAlmostEqual(level_one_equity_stage["equity"], 0.80)
+        self.assertTrue(
+            all(
+                abs(level_one_equity_stage[category] - 1.0 / 15.0) < 1e-12
+                for category in ("commodity", "convertible", "pure_bond")
+            )
+        )
+
+        level_one_commodity_stage = profiles["1"]["weights"]["4"]
+        for category, expected in {
+            "equity": 0.35,
+            "commodity": 0.45,
+            "convertible": 0.10,
+            "pure_bond": 0.10,
+        }.items():
+            self.assertAlmostEqual(level_one_commodity_stage[category], expected)
+
+        level_five_bond_stage = profiles["5"]["weights"]["6"]
+        self.assertAlmostEqual(level_five_bond_stage["pure_bond"], 0.80)
+        self.assertTrue(
+            all(
+                abs(level_five_bond_stage[category] - 1.0 / 15.0) < 1e-12
+                for category in ("equity", "commodity", "convertible")
+            )
+        )
+
+        level_five_convertible_stage = profiles["5"]["weights"]["1"]
+        for category, expected in {
+            "equity": 0.10,
+            "commodity": 0.10,
+            "convertible": 0.45,
+            "pure_bond": 0.35,
+        }.items():
+            self.assertAlmostEqual(level_five_convertible_stage[category], expected)
+
+        for profile in profiles.values():
+            parsed = server.parse_stage_weights(profile["weights"])
+            for weights in parsed.values():
+                self.assertAlmostEqual(sum(weights.values()), 1.0)
+
     def test_custom_stage_weights_are_validated(self) -> None:
         custom = server.default_stage_weights()
         custom["2"] = {

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>底层资产回测平台</title>
-    <link rel="stylesheet" href="/styles.css?v=20260611-4" />
+    <link rel="stylesheet" href="/styles.css?v=20260611-6" />
   </head>
   <body>
     <header class="topbar">
@@ -24,7 +24,17 @@
             <span>商品优势</span>
           </label>
         </div>
-        <button id="stageSettingsBtn" class="ghost-btn" type="button">Stage 比例</button>
+        <div class="stage-control-stack">
+          <button id="stageSettingsBtn" class="ghost-btn" type="button">Stage 比例</button>
+          <div class="stage-tilt-control" aria-label="股债倾向">
+            <div id="stageProfileSwitch" class="stage-tilt-track"></div>
+            <div class="stage-tilt-labels" aria-hidden="true">
+              <span>偏债</span>
+              <span>均衡</span>
+              <span>偏股</span>
+            </div>
+          </div>
+        </div>
         <button id="clearBtn" class="ghost-btn danger-btn" type="button">清空篮子</button>
         <button id="resetBtn" class="ghost-btn" type="button">恢复默认</button>
         <button id="runBtn" class="primary-btn" type="button">运行回测</button>
@@ -250,6 +260,6 @@
       </section>
     </div>
 
-    <script src="/app.js?v=20260611-4"></script>
+    <script src="/app.js?v=20260611-6"></script>
   </body>
 </html>

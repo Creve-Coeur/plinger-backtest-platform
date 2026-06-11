@@ -52,7 +52,10 @@ const state = {
   },
   defaults: null,
   defaultStageWeights: null,
+  stageWeightProfiles: {},
   stageWeights: null,
+  stageWeightProfile: "3",
+  collapsedAssetSections: new Set(),
   attributionMode: "stage",
   pring: null,
   result: null,
@@ -71,6 +74,7 @@ const els = {
   cancelStageSettingsBtn: document.getElementById("cancelStageSettingsBtn"),
   applyStageSettingsBtn: document.getElementById("applyStageSettingsBtn"),
   resetStageWeightsBtn: document.getElementById("resetStageWeightsBtn"),
+  stageProfileSwitch: document.getElementById("stageProfileSwitch"),
   stageWeightRows: document.getElementById("stageWeightRows"),
   stageWeightStatus: document.getElementById("stageWeightStatus"),
   ma20Equity: document.getElementById("ma20Equity"),
@@ -104,7 +108,10 @@ async function init() {
     state.grouped = data.groups;
     state.defaults = data.defaults;
     state.defaultStageWeights = cloneWeights(data.defaultStageWeights);
+    state.stageWeightProfiles = data.stageWeightProfiles || {};
     state.stageWeights = cloneWeights(data.defaultStageWeights);
+    state.stageWeightProfile = detectStageWeightProfile(state.stageWeights);
+    renderStageProfileSwitch();
     updateStageSettingsButton();
     state.pring = data.pring;
     Object.values(state.grouped).flat().forEach((asset) => state.assetsById.set(asset.id, asset));
@@ -255,7 +262,7 @@ function renderAssets() {
 
   els.assetList.innerHTML = "";
 
-  const appendAsset = (asset) => {
+  const appendAsset = (asset, container = els.assetList) => {
     const card = document.createElement("div");
     card.className = "asset-card";
     card.draggable = true;
@@ -284,22 +291,52 @@ function renderAssets() {
       event.dataTransfer.setData("text/plain", asset.id);
     });
     card.addEventListener("dragend", () => card.classList.remove("dragging"));
-    els.assetList.appendChild(card);
+    container.appendChild(card);
   };
 
   if (state.activeTab === "manager") {
-    assets.forEach(appendAsset);
+    assets.forEach((asset) => appendAsset(asset));
     return;
   }
 
   categoryOrder.forEach((category) => {
     const categoryAssets = assets.filter((asset) => asset.category === category);
     if (!categoryAssets.length) return;
-    const heading = document.createElement("div");
+    const sectionKey = `${state.activeTab}:${category}`;
+    const collapsed = !query && state.collapsedAssetSections.has(sectionKey);
+    const section = document.createElement("section");
+    section.className = `asset-section${collapsed ? " collapsed" : ""}`;
+
+    const heading = document.createElement("button");
+    heading.type = "button";
     heading.className = `asset-section-title category-${category}`;
-    heading.innerHTML = `<span>${basketLabels[category]}</span><strong>${categoryAssets.length}</strong>`;
-    els.assetList.appendChild(heading);
-    categoryAssets.forEach(appendAsset);
+    heading.setAttribute("aria-expanded", String(!collapsed));
+    heading.innerHTML = `
+      <span class="asset-section-label">
+        <span class="collapse-chevron" aria-hidden="true"></span>
+        ${basketLabels[category]}
+      </span>
+      <strong>${categoryAssets.length}</strong>
+    `;
+
+    const body = document.createElement("div");
+    body.className = "asset-section-body";
+    body.hidden = collapsed;
+    categoryAssets.forEach((asset) => appendAsset(asset, body));
+
+    heading.addEventListener("click", () => {
+      const willCollapse = !section.classList.contains("collapsed");
+      section.classList.toggle("collapsed", willCollapse);
+      body.hidden = willCollapse;
+      heading.setAttribute("aria-expanded", String(!willCollapse));
+      if (willCollapse) {
+        state.collapsedAssetSections.add(sectionKey);
+      } else {
+        state.collapsedAssetSections.delete(sectionKey);
+      }
+    });
+    section.append(heading, body);
+    els.assetList.appendChild(section);
   });
 }
 
@@ -457,7 +494,7 @@ function renderStageWeightRows(weights) {
                   type="number"
                   min="0"
                   max="100"
-                  step="0.1"
+                  step="0.01"
                   value="${formatWeightInput(row[category] * 100)}"
                   data-stage="${stage}"
                   data-category="${category}"
@@ -483,8 +520,58 @@ function renderStageWeightRows(weights) {
     .join("");
 
   els.stageWeightRows.querySelectorAll("input").forEach((input) => {
-    input.addEventListener("input", updateStageRowTotal);
+    input.addEventListener("input", (event) => {
+      updateStageRowTotal(event);
+    });
   });
+}
+
+function renderStageProfileSwitch() {
+  const levels = ["5", "4", "3", "2", "1"];
+  els.stageProfileSwitch.innerHTML = levels
+    .map(
+      (level) => {
+        const profile = state.stageWeightProfiles[level];
+        return `
+        <button
+          type="button"
+          class="stage-tilt-point level-${level}"
+          data-stage-profile="${level}"
+          aria-label="${escapeHtml(profile.shortLabel)}"
+          title="${escapeHtml(`${profile.label} · ${profile.shortLabel}：${profile.description}`)}"
+        >
+          <span></span>
+        </button>
+      `;
+      },
+    )
+    .join("");
+  els.stageProfileSwitch.querySelectorAll("[data-stage-profile]").forEach((button) => {
+    button.addEventListener("click", () => applyStageWeightProfile(button.dataset.stageProfile));
+  });
+  updateStageProfileControls();
+}
+
+function applyStageWeightProfile(level) {
+  const profile = state.stageWeightProfiles[level];
+  if (!profile) return;
+  state.stageWeights = cloneWeights(profile.weights);
+  state.stageWeightProfile = level;
+  updateStageProfileControls();
+  updateStageSettingsButton();
+  setStatus(
+    `Stage 资产比例已切换为${profile.label}（${profile.shortLabel}）。`,
+    "ok",
+  );
+}
+
+function updateStageProfileControls() {
+  els.stageProfileSwitch.querySelectorAll("[data-stage-profile]").forEach((button) => {
+    const active = button.dataset.stageProfile === state.stageWeightProfile;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  els.stageProfileSwitch.classList.toggle("custom", !state.stageWeightProfile);
 }
 
 function updateStageRowTotal(event) {
@@ -544,33 +631,68 @@ function readStageWeights() {
 function applyStageSettings() {
   try {
     state.stageWeights = readStageWeights();
+    state.stageWeightProfile = detectStageWeightProfile(state.stageWeights);
+    updateStageProfileControls();
     updateStageSettingsButton();
     closeStageSettings();
-    setStatus("Stage 资产比例已更新。", "ok");
+    const appliedProfile = state.stageWeightProfiles[state.stageWeightProfile];
+    setStatus(
+      appliedProfile
+        ? `Stage 资产比例已切换为${appliedProfile.label}（${appliedProfile.shortLabel}）。`
+        : "Stage 资产比例已更新为自定义配置。",
+      "ok",
+    );
   } catch (err) {
     els.stageWeightStatus.textContent = err.message || String(err);
   }
 }
 
 function resetStageWeights() {
-  state.stageWeights = cloneWeights(state.defaultStageWeights);
-  renderStageWeightRows(state.stageWeights);
-  updateStageSettingsButton();
-  els.stageWeightStatus.textContent = "已恢复默认比例";
+  const profile = state.stageWeightProfiles["3"];
+  renderStageWeightRows(profile.weights);
+  els.stageWeightStatus.textContent = "已恢复第三档（均衡），点击“应用”生效";
 }
 
 function updateStageSettingsButton() {
-  const custom = JSON.stringify(state.stageWeights) !== JSON.stringify(state.defaultStageWeights);
-  els.stageSettingsBtn.classList.toggle("active-setting", custom);
-  els.stageSettingsBtn.textContent = custom ? "Stage 比例 · 自定义" : "Stage 比例";
+  const profile = state.stageWeightProfiles[state.stageWeightProfile];
+  const custom = !profile;
+  els.stageSettingsBtn.classList.remove("active-setting", "tilt-equity", "tilt-bond", "tilt-neutral");
+  if (custom) {
+    els.stageSettingsBtn.classList.add("active-setting");
+  } else if (["1", "2"].includes(state.stageWeightProfile)) {
+    els.stageSettingsBtn.classList.add("tilt-equity");
+  } else if (["4", "5"].includes(state.stageWeightProfile)) {
+    els.stageSettingsBtn.classList.add("tilt-bond");
+  } else {
+    els.stageSettingsBtn.classList.add("tilt-neutral");
+  }
+  els.stageSettingsBtn.textContent = profile
+    ? `Stage 比例 · ${profile.label}`
+    : "Stage 比例 · 自定义";
 }
 
 function cloneWeights(weights) {
   return JSON.parse(JSON.stringify(weights || {}));
 }
 
+function detectStageWeightProfile(weights) {
+  for (const [level, profile] of Object.entries(state.stageWeightProfiles)) {
+    if (stageWeightsMatch(weights, profile.weights)) return level;
+  }
+  return null;
+}
+
+function stageWeightsMatch(left, right) {
+  return stageNumbers.every((stage) =>
+    categoryOrder.every(
+      (category) =>
+        Math.abs(Number(left?.[stage]?.[category]) - Number(right?.[stage]?.[category])) < 0.00001,
+    ),
+  );
+}
+
 function formatWeightInput(value) {
-  return Number(value.toFixed(4)).toString();
+  return Number(value.toFixed(6)).toString();
 }
 
 function updateDateRangeBounds(reset = false) {

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>底层资产回测平台</title>
-    <link rel="stylesheet" href="/styles.css?v=20260609-3" />
+    <link rel="stylesheet" href="/styles.css?v=20260611-3" />
   </head>
   <body>
     <header class="topbar">
@@ -13,25 +13,18 @@
         <h1>底层资产回测平台</h1>
       </div>
       <div class="top-actions">
-        <div class="control-group" aria-label="MA20 风控设置">
-          <span class="control-title">MA20 风控</span>
+        <div class="control-group" aria-label="MA20 + KST 风控设置">
+          <span class="control-title">MA20 + KST 风控</span>
           <label class="check-pill">
-            <input id="ma20Equity" type="checkbox" checked />
+            <input id="ma20Equity" type="checkbox" />
             <span>股票优势</span>
           </label>
           <label class="check-pill">
-            <input id="ma20Commodity" type="checkbox" checked />
+            <input id="ma20Commodity" type="checkbox" />
             <span>商品优势</span>
           </label>
-          <label class="check-pill">
-            <input id="ma20Convertible" type="checkbox" />
-            <span>转债优势</span>
-          </label>
-          <label class="check-pill confirm-pill" title="连续3个交易日低于或站上MA20后，下一交易日执行">
-            <input id="ma20ThreeDay" type="checkbox" />
-            <span>3日MA20</span>
-          </label>
         </div>
+        <button id="stageSettingsBtn" class="ghost-btn" type="button">Stage 比例</button>
         <button id="clearBtn" class="ghost-btn danger-btn" type="button">清空篮子</button>
         <button id="resetBtn" class="ghost-btn" type="button">恢复默认</button>
         <button id="runBtn" class="primary-btn" type="button">运行回测</button>
@@ -47,8 +40,9 @@
           </div>
         </div>
         <div class="tabs" role="tablist">
-          <button class="tab active" data-tab="fund" type="button">基金</button>
-          <button class="tab" data-tab="index" type="button">指数</button>
+          <button class="tab" data-tab="fund" type="button">基金</button>
+          <button class="tab" data-tab="manager" type="button">基金经理</button>
+          <button class="tab active" data-tab="index" type="button">指数</button>
           <button class="tab" data-tab="enhanced" type="button">增强</button>
         </div>
         <input id="searchInput" class="search" type="search" placeholder="搜索代码或名称" />
@@ -84,6 +78,23 @@
               <span class="badge blue">水库</span>
             </div>
             <div class="dropzone" data-basket="pure_bond"></div>
+          </div>
+        </section>
+
+        <section class="date-panel">
+          <div class="date-panel-head">
+            <h2>回测区间</h2>
+            <span id="dateRangeHint">根据当前篮子计算共同区间</span>
+          </div>
+          <div class="date-fields">
+            <label>
+              <span>开始日期</span>
+              <input id="startDate" type="date" />
+            </label>
+            <label>
+              <span>结束日期</span>
+              <input id="endDate" type="date" />
+            </label>
           </div>
         </section>
 
@@ -146,7 +157,7 @@
             <article class="chart-card wide">
               <div class="chart-title">
                 <h3>仓位分布</h3>
-                <span>MA20 后真实持仓</span>
+                <span>MA20 + KST 分级风控后真实持仓</span>
               </div>
               <canvas id="weightChart" height="250"></canvas>
             </article>
@@ -174,6 +185,19 @@
           </div>
 
           <div class="table-grid">
+            <article class="table-card wide">
+              <div class="table-title">
+                <div class="table-title-copy">
+                  <h3>阶段资产表现归因</h3>
+                  <span id="stageAttributionHint">连续相同 Stage 合并；贡献点按每日真实持仓计算</span>
+                </div>
+                <div class="segmented-control" aria-label="归因拆解方式">
+                  <button class="active" type="button" data-attribution-mode="stage">按 Stage</button>
+                  <button type="button" data-attribution-mode="year">按年份</button>
+                </div>
+              </div>
+              <div id="stageAttributionTable" class="table-wrap stage-attribution-wrap"></div>
+            </article>
             <article class="table-card">
               <h3>年度归因</h3>
               <div id="annualTable" class="table-wrap"></div>
@@ -187,14 +211,45 @@
               <div id="tradeTable" class="table-wrap"></div>
             </article>
             <article class="table-card wide">
-              <h3>MA20 逃逸诊断</h3>
-              <div id="escapeTable" class="table-wrap"></div>
+              <h3>分级风控诊断</h3>
+              <div id="riskTable" class="table-wrap"></div>
             </article>
           </div>
         </section>
       </section>
     </main>
 
-    <script src="/app.js?v=20260609-3"></script>
+    <div id="stageSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="stageSettingsTitle">
+      <section class="modal-dialog">
+        <header class="modal-head">
+          <h2 id="stageSettingsTitle">Stage 资产比例</h2>
+          <button id="closeStageSettingsBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button>
+        </header>
+        <div class="stage-weight-wrap">
+          <table class="stage-weight-table">
+            <thead>
+              <tr>
+                <th>Stage</th>
+                <th>优势资产</th>
+                <th>股票</th>
+                <th>商品</th>
+                <th>可转债</th>
+                <th>纯债</th>
+                <th>合计</th>
+              </tr>
+            </thead>
+            <tbody id="stageWeightRows"></tbody>
+          </table>
+        </div>
+        <footer class="modal-actions">
+          <span id="stageWeightStatus"></span>
+          <button id="resetStageWeightsBtn" class="ghost-btn" type="button">恢复默认比例</button>
+          <button id="cancelStageSettingsBtn" class="ghost-btn" type="button">取消</button>
+          <button id="applyStageSettingsBtn" class="primary-btn" type="button">应用</button>
+        </footer>
+      </section>
+    </div>
+
+    <script src="/app.js?v=20260611-3"></script>
   </body>
 </html>

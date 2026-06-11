@@ -7,6 +7,7 @@ const basketLabels = {
 
 const moduleLabels = {
   fund: "基金",
+  manager: "基金经理",
   index: "指数",
   enhanced: "增强",
 };
@@ -15,8 +16,7 @@ const rebalanceTypeLabels = {
   initial: "初始建仓",
   stage_change: "Stage变化",
   three_month: "三个月再平衡",
-  ma20_exit: "MA20退出",
-  ma20_reentry: "MA20恢复",
+  risk_tier: "分级风控",
   splice_switch: "拼接切换",
 };
 
@@ -31,10 +31,13 @@ const colors = {
   pure_bond: "#4f7896",
 };
 
+const categoryOrder = ["equity", "commodity", "convertible", "pure_bond"];
+const stageNumbers = [1, 2, 3, 4, 5, 6, 7, 8];
+
 const state = {
-  grouped: { fund: [], index: [], enhanced: [] },
+  grouped: { fund: [], manager: [], index: [], enhanced: [] },
   assetsById: new Map(),
-  activeTab: "fund",
+  activeTab: "index",
   baskets: {
     equity: [],
     commodity: [],
@@ -48,6 +51,10 @@ const state = {
     pure_bond: [],
   },
   defaults: null,
+  defaultStageWeights: null,
+  stageWeights: null,
+  attributionMode: "stage",
+  pring: null,
   result: null,
 };
 
@@ -58,10 +65,19 @@ const els = {
   runBtn: document.getElementById("runBtn"),
   resetBtn: document.getElementById("resetBtn"),
   clearBtn: document.getElementById("clearBtn"),
+  stageSettingsBtn: document.getElementById("stageSettingsBtn"),
+  stageSettingsModal: document.getElementById("stageSettingsModal"),
+  closeStageSettingsBtn: document.getElementById("closeStageSettingsBtn"),
+  cancelStageSettingsBtn: document.getElementById("cancelStageSettingsBtn"),
+  applyStageSettingsBtn: document.getElementById("applyStageSettingsBtn"),
+  resetStageWeightsBtn: document.getElementById("resetStageWeightsBtn"),
+  stageWeightRows: document.getElementById("stageWeightRows"),
+  stageWeightStatus: document.getElementById("stageWeightStatus"),
   ma20Equity: document.getElementById("ma20Equity"),
   ma20Commodity: document.getElementById("ma20Commodity"),
-  ma20Convertible: document.getElementById("ma20Convertible"),
-  ma20ThreeDay: document.getElementById("ma20ThreeDay"),
+  startDate: document.getElementById("startDate"),
+  endDate: document.getElementById("endDate"),
+  dateRangeHint: document.getElementById("dateRangeHint"),
   spliceToggle: document.getElementById("spliceToggle"),
   splicePool: document.getElementById("splicePool"),
   splicePanel: document.getElementById("splicePanel"),
@@ -69,10 +85,12 @@ const els = {
   results: document.getElementById("results"),
   metrics: document.getElementById("metrics"),
   windowText: document.getElementById("windowText"),
+  stageAttributionHint: document.getElementById("stageAttributionHint"),
+  stageAttributionTable: document.getElementById("stageAttributionTable"),
   annualTable: document.getElementById("annualTable"),
   efficiencyTable: document.getElementById("efficiencyTable"),
   tradeTable: document.getElementById("tradeTable"),
-  escapeTable: document.getElementById("escapeTable"),
+  riskTable: document.getElementById("riskTable"),
 };
 
 init();
@@ -85,6 +103,10 @@ async function init() {
     const data = await res.json();
     state.grouped = data.groups;
     state.defaults = data.defaults;
+    state.defaultStageWeights = cloneWeights(data.defaultStageWeights);
+    state.stageWeights = cloneWeights(data.defaultStageWeights);
+    updateStageSettingsButton();
+    state.pring = data.pring;
     Object.values(state.grouped).flat().forEach((asset) => state.assetsById.set(asset.id, asset));
     resetDefaults();
     renderAssets();
@@ -109,8 +131,26 @@ function wireEvents() {
   els.searchInput.addEventListener("input", renderAssets);
   els.resetBtn.addEventListener("click", resetDefaults);
   els.clearBtn.addEventListener("click", clearBaskets);
+  els.stageSettingsBtn.addEventListener("click", openStageSettings);
+  els.closeStageSettingsBtn.addEventListener("click", closeStageSettings);
+  els.cancelStageSettingsBtn.addEventListener("click", closeStageSettings);
+  els.applyStageSettingsBtn.addEventListener("click", applyStageSettings);
+  els.resetStageWeightsBtn.addEventListener("click", resetStageWeights);
+  els.stageSettingsModal.addEventListener("click", (event) => {
+    if (event.target === els.stageSettingsModal) closeStageSettings();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !els.stageSettingsModal.classList.contains("hidden")) {
+      closeStageSettings();
+    }
+  });
   els.runBtn.addEventListener("click", runBacktest);
   els.spliceToggle.addEventListener("change", renderSplicePool);
+  els.startDate.addEventListener("change", validateDateInputs);
+  els.endDate.addEventListener("change", validateDateInputs);
+  document.querySelectorAll("[data-attribution-mode]").forEach((button) => {
+    button.addEventListener("click", () => setAttributionMode(button.dataset.attributionMode));
+  });
 
   document.querySelectorAll(".dropzone").forEach((zone) => {
     zone.addEventListener("dragover", (event) => {
@@ -157,6 +197,7 @@ function resetDefaults() {
   };
   renderBaskets();
   renderSplicePool();
+  updateDateRangeBounds(true);
 }
 
 function clearBaskets() {
@@ -164,6 +205,9 @@ function clearBaskets() {
   state.spliceBaskets = emptyBaskets();
   renderBaskets();
   renderSplicePool();
+  els.startDate.value = "";
+  els.endDate.value = "";
+  els.dateRangeHint.textContent = "请先为四类资产选择标的";
   setStatus("四类资产篮子已清空。", "");
 }
 
@@ -179,7 +223,17 @@ function emptyBaskets() {
 function renderAssets() {
   const query = els.searchInput.value.trim().toLowerCase();
   const assets = (state.grouped[state.activeTab] || []).filter((asset) => {
-    const haystack = `${asset.code} ${asset.name}`.toLowerCase();
+    const haystack = [
+      asset.code,
+      asset.name,
+      asset.manager,
+      asset.roleLabel,
+      asset.fullLabel,
+      asset.cluster,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
     return !query || haystack.includes(query);
   });
 
@@ -201,7 +255,15 @@ function renderAssets() {
         <span>${escapeHtml(asset.name)}</span>
         <span class="module-pill">${moduleLabels[asset.module]}</span>
       </div>
-      <div class="asset-code">${escapeHtml(asset.code)}</div>
+      <div class="asset-code">${escapeHtml(asset.code)}${asset.manager ? ` · ${escapeHtml(asset.manager)}` : ""}</div>
+      ${
+        asset.cluster || asset.roleLabel
+          ? `<div class="asset-tags" title="${escapeHtml(asset.fullLabel || asset.roleLabel || asset.cluster)}">
+              ${asset.cluster ? `<span>${escapeHtml(asset.cluster)}</span>` : ""}
+              ${asset.roleLabel ? `<span>${escapeHtml(asset.roleLabel)}</span>` : ""}
+            </div>`
+          : ""
+      }
       <div class="asset-dates">${asset.start} 至 ${asset.end}</div>
     `;
     card.addEventListener("dragstart", (event) => {
@@ -240,6 +302,7 @@ function renderBaskets() {
       zone.appendChild(item);
     });
   });
+  updateDateRangeBounds();
 }
 
 function renderSplicePool() {
@@ -272,6 +335,7 @@ function renderSplicePool() {
       zone.appendChild(item);
     });
   });
+  updateDateRangeBounds();
 }
 
 function addToBasket(id, basket) {
@@ -302,6 +366,7 @@ function addToSpliceBasket(id, basket) {
 }
 
 async function runBacktest() {
+  if (!validateDateInputs()) return;
   setStatus("正在运行回测...", "");
   els.runBtn.disabled = true;
   try {
@@ -314,9 +379,12 @@ async function runBacktest() {
       ma20Controls: {
         equity: els.ma20Equity.checked,
         commodity: els.ma20Commodity.checked,
-        convertible: els.ma20Convertible.checked,
       },
-      ma20ThreeDay: els.ma20ThreeDay.checked,
+      dateRange: {
+        start: els.startDate.value || null,
+        end: els.endDate.value || null,
+      },
+      stageWeights: state.stageWeights,
     };
     const res = await fetch("/api/backtest", {
       method: "POST",
@@ -335,6 +403,211 @@ async function runBacktest() {
   }
 }
 
+function openStageSettings() {
+  renderStageWeightRows(state.stageWeights);
+  els.stageWeightStatus.textContent = "";
+  els.stageSettingsModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+}
+
+function closeStageSettings() {
+  els.stageSettingsModal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+function renderStageWeightRows(weights) {
+  els.stageWeightRows.innerHTML = stageNumbers
+    .map((stage) => {
+      const row = weights[stage];
+      const dominant = dominantCategory(row);
+      const cells = categoryOrder
+        .map(
+          (category) => `
+            <td>
+              <label class="weight-input">
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  value="${formatWeightInput(row[category] * 100)}"
+                  data-stage="${stage}"
+                  data-category="${category}"
+                  aria-label="Stage ${stage} ${basketLabels[category]}比例"
+                />
+                <span>%</span>
+              </label>
+            </td>
+          `,
+        )
+        .join("");
+      return `
+        <tr data-stage-row="${stage}">
+          <td>Stage ${stage}</td>
+          <td class="stage-dominant-cell" data-stage-dominant>
+            <span class="dominant-badge">${basketLabels[dominant]}</span>
+          </td>
+          ${cells}
+          <td class="stage-total">100%</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  els.stageWeightRows.querySelectorAll("input").forEach((input) => {
+    input.addEventListener("input", updateStageRowTotal);
+  });
+}
+
+function updateStageRowTotal(event) {
+  const row = event.target.closest("tr");
+  const total = Array.from(row.querySelectorAll("input")).reduce(
+    (sum, input) => sum + (Number(input.value) || 0),
+    0,
+  );
+  const totalCell = row.querySelector(".stage-total");
+  totalCell.textContent = `${formatWeightInput(total)}%`;
+  totalCell.classList.toggle("invalid", Math.abs(total - 100) > 0.001);
+  updateStageRowDominant(row);
+}
+
+function updateStageRowDominant(row) {
+  const weights = {};
+  categoryOrder.forEach((category) => {
+    const input = row.querySelector(`input[data-category="${category}"]`);
+    weights[category] = Number(input?.value) || 0;
+  });
+  const dominant = dominantCategory(weights);
+  row.querySelector("[data-stage-dominant]").innerHTML =
+    `<span class="dominant-badge">${basketLabels[dominant]}</span>`;
+}
+
+function dominantCategory(weights) {
+  return categoryOrder.reduce((best, category) => {
+    const bestWeight = Number(weights?.[best]) || 0;
+    const categoryWeight = Number(weights?.[category]) || 0;
+    return categoryWeight > bestWeight ? category : best;
+  }, categoryOrder[0]);
+}
+
+function readStageWeights() {
+  const weights = {};
+  for (const stage of stageNumbers) {
+    const row = els.stageWeightRows.querySelector(`tr[data-stage-row="${stage}"]`);
+    const values = {};
+    let total = 0;
+    for (const category of categoryOrder) {
+      const input = row.querySelector(`input[data-category="${category}"]`);
+      const value = Number(input.value);
+      if (!Number.isFinite(value) || value < 0 || value > 100) {
+        throw new Error(`Stage ${stage} 的${basketLabels[category]}比例必须在 0% 至 100% 之间`);
+      }
+      values[category] = value / 100;
+      total += value;
+    }
+    if (Math.abs(total - 100) > 0.001) {
+      throw new Error(`Stage ${stage} 四类资产比例合计必须为 100%，当前为 ${formatWeightInput(total)}%`);
+    }
+    weights[stage] = values;
+  }
+  return weights;
+}
+
+function applyStageSettings() {
+  try {
+    state.stageWeights = readStageWeights();
+    updateStageSettingsButton();
+    closeStageSettings();
+    setStatus("Stage 资产比例已更新。", "ok");
+  } catch (err) {
+    els.stageWeightStatus.textContent = err.message || String(err);
+  }
+}
+
+function resetStageWeights() {
+  state.stageWeights = cloneWeights(state.defaultStageWeights);
+  renderStageWeightRows(state.stageWeights);
+  updateStageSettingsButton();
+  els.stageWeightStatus.textContent = "已恢复默认比例";
+}
+
+function updateStageSettingsButton() {
+  const custom = JSON.stringify(state.stageWeights) !== JSON.stringify(state.defaultStageWeights);
+  els.stageSettingsBtn.classList.toggle("active-setting", custom);
+  els.stageSettingsBtn.textContent = custom ? "Stage 比例 · 自定义" : "Stage 比例";
+}
+
+function cloneWeights(weights) {
+  return JSON.parse(JSON.stringify(weights || {}));
+}
+
+function formatWeightInput(value) {
+  return Number(value.toFixed(4)).toString();
+}
+
+function updateDateRangeBounds(reset = false) {
+  if (!els.startDate || !state.pring) return;
+  const mainIds = Object.values(state.baskets).flat();
+  if (!mainIds.length) {
+    els.startDate.removeAttribute("min");
+    els.startDate.removeAttribute("max");
+    els.endDate.removeAttribute("min");
+    els.endDate.removeAttribute("max");
+    return;
+  }
+
+  const spliceComplete =
+    els.spliceToggle.checked &&
+    Object.values(state.spliceBaskets).every((ids) => ids.length > 0);
+  const startIds = spliceComplete ? Object.values(state.spliceBaskets).flat() : mainIds;
+  const startCandidates = startIds
+    .map((id) => state.assetsById.get(id)?.start)
+    .filter(Boolean);
+  const endCandidates = mainIds
+    .map((id) => state.assetsById.get(id)?.end)
+    .filter(Boolean);
+  if (!startCandidates.length || !endCandidates.length) return;
+
+  const signalFloor = addDays(state.pring.start, 1);
+  const commonStart = [signalFloor, ...startCandidates].sort().at(-1);
+  const commonEnd = endCandidates.sort()[0];
+  if (!commonStart || !commonEnd || commonStart > commonEnd) {
+    els.dateRangeHint.textContent = "当前选择没有共同可用区间";
+    return;
+  }
+
+  els.startDate.min = commonStart;
+  els.startDate.max = commonEnd;
+  els.endDate.min = commonStart;
+  els.endDate.max = commonEnd;
+  if (reset || !els.startDate.value || els.startDate.value < commonStart || els.startDate.value > commonEnd) {
+    els.startDate.value = commonStart;
+  }
+  if (reset || !els.endDate.value || els.endDate.value < commonStart || els.endDate.value > commonEnd) {
+    els.endDate.value = commonEnd;
+  }
+  els.dateRangeHint.textContent = `可用共同区间 ${commonStart} 至 ${commonEnd}`;
+}
+
+function validateDateInputs() {
+  const start = els.startDate.value;
+  const end = els.endDate.value;
+  if (start && end && start > end) {
+    setStatus("回测开始日期不能晚于结束日期。", "error");
+    return false;
+  }
+  return true;
+}
+
+function addDays(dateText, days) {
+  const date = new Date(`${dateText}T00:00:00`);
+  date.setDate(date.getDate() + days);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function renderResult(data) {
   els.results.classList.remove("hidden");
   const activeControls = Object.entries(data.ma20Controls || {})
@@ -344,10 +617,9 @@ function renderResult(data) {
   const spliceText = data.spliceContext?.enabled
     ? `；模拟拼接：${data.spliceContext.indexStart} 至 ${data.spliceContext.indexEnd} 用指数，${data.spliceContext.fundStart} 起用基金`
     : "";
-  const ma20Mode = data.ma20ThreeDay ? "连续3日确认" : "单日确认";
   const stats = data.rebalanceStats || {};
-  const rebalanceText = `策略调仓 ${stats.strategyTotal ?? 0} 次（Stage变化 ${stats.stageChanges ?? 0} 次，三个月再平衡 ${stats.threeMonth ?? 0} 次；不含初始建仓和MA20）`;
-  els.windowText.textContent = `${data.window.start} 至 ${data.window.end}，共 ${data.window.days} 个交易日；${rebalanceText}；MA20 风控：${activeControls || "关闭"}${activeControls ? `（${ma20Mode}）` : ""}${spliceText}。`;
+  const rebalanceText = `策略调仓 ${stats.strategyTotal ?? 0} 次（Stage变化 ${stats.stageChanges ?? 0} 次，三个月再平衡 ${stats.threeMonth ?? 0} 次；分级风控动作 ${stats.riskActions ?? 0} 次）`;
+  els.windowText.textContent = `${data.window.start} 至 ${data.window.end}，共 ${data.window.days} 个交易日；${rebalanceText}；MA20 + KST 风控：${activeControls || "关闭"}${spliceText}。`;
   renderMetrics(data.metrics);
   renderCharts(data);
   renderTables(data);
@@ -432,6 +704,8 @@ function renderCharts(data) {
 }
 
 function renderTables(data) {
+  renderSelectedAttribution(data);
+
   els.annualTable.innerHTML = table(
     ["年份", "策略", "沪深300", "股票贡献", "商品贡献", "转债贡献", "纯债贡献"],
     data.annualAttribution.map((row) => [
@@ -458,12 +732,14 @@ function renderTables(data) {
   );
 
   els.tradeTable.innerHTML = table(
-    ["日期", "类型", "Stage", "优势资产", "逻辑", "股票", "商品", "转债", "纯债"],
+    ["日期", "类型", "Stage", "优势资产", "风险档位", "切档", "逻辑", "股票", "商品", "转债", "纯债"],
     data.tradeLogs.slice(-20).reverse().map((row) => [
       row.start,
       rebalanceTypeLabels[row.rebalanceType] || row.rebalanceType || "-",
       Number.isFinite(row.stage) ? `Stage ${row.stage}` : "-",
       basketLabels[row.dominantAsset] || row.dominantAsset || "-",
+      pct(row.riskTier),
+      row.riskTransition || "-",
       row.reason,
       pct(row.equityWeight),
       pct(row.commodityWeight),
@@ -472,26 +748,165 @@ function renderTables(data) {
     ]),
   );
 
-  const escapes = [
-    ...(data.escapeDiagnostics.equity || []).map((row) => ({ ...row, asset: "股票" })),
-    ...(data.escapeDiagnostics.commodity || []).map((row) => ({ ...row, asset: "商品" })),
-    ...(data.escapeDiagnostics.convertible || []).map((row) => ({ ...row, asset: "可转债" })),
-  ];
-  els.escapeTable.innerHTML = escapes.length
+  const diagnostics = data.riskDiagnostics || [];
+  els.riskTable.innerHTML = diagnostics.length
     ? table(
-        ["资产", "开始", "结束", "天数", "躲过下跌", "错过反弹", "底层涨跌", "纯债收益"],
-        escapes.map((row) => [
-          row.asset,
-          row.start,
-          row.end,
-          row.days,
-          pct(row.avoidedDrawdown),
-          pct(row.missedRunup),
-          pct(row.assetReturn),
-          pct(row.pureBondReturn),
+        ["执行日", "信号日", "资产", "切档", "MA20", "KST", "Signal", "10日斜率", "KST状态", "原因"],
+        diagnostics.slice().reverse().map((row) => [
+          row.date,
+          row.signalDate || "-",
+          basketLabels[row.asset] || row.asset,
+          row.transition || "-",
+          row.ma20Above === null ? "-" : row.ma20Above ? "上方" : "下方",
+          num(row.kst),
+          num(row.kstSignal),
+          num(row.kstSlope10),
+          row.kstReady ? (row.kstWeak ? "弱" : "不弱") : "预热中",
+          row.reason,
         ]),
       )
-    : `<div class="empty-state">未检测到完整的 MA20 逃逸区间</div>`;
+    : `<div class="empty-state">未发生 MA20 + KST 风险档位切换</div>`;
+}
+
+function setAttributionMode(mode) {
+  state.attributionMode = mode === "year" ? "year" : "stage";
+  document.querySelectorAll("[data-attribution-mode]").forEach((button) => {
+    const active = button.dataset.attributionMode === state.attributionMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  if (state.result) renderSelectedAttribution(state.result);
+}
+
+function renderSelectedAttribution(data) {
+  const yearMode = state.attributionMode === "year";
+  els.stageAttributionHint.textContent = yearMode
+    ? "连续 Stage 在每个自然年末截断；区间收益与贡献重新计算"
+    : "连续相同 Stage 合并；贡献点按每日真实持仓计算";
+  renderStageAttribution(
+    yearMode ? data.yearStageAttribution || [] : data.stageAttribution || [],
+  );
+}
+
+function renderStageAttribution(rows) {
+  if (!rows.length) {
+    els.stageAttributionTable.innerHTML = `<div class="empty-state">暂无阶段归因数据</div>`;
+    return;
+  }
+  const yearMode = state.attributionMode === "year";
+  const yearCounts = yearMode
+    ? rows.reduce((counts, row) => {
+        const year = row.start.slice(0, 4);
+        counts[year] = (counts[year] || 0) + 1;
+        return counts;
+      }, {})
+    : {};
+  const renderedYears = new Set();
+
+  els.stageAttributionTable.innerHTML = `
+    <table class="stage-attribution-table">
+      <thead>
+        <tr>
+          ${yearMode ? '<th class="year-header" rowspan="2">年份</th>' : ""}
+          <th rowspan="2">持有区间</th>
+          <th rowspan="2">阶段</th>
+          <th rowspan="2">优势资产</th>
+          <th rowspan="2">优势排名</th>
+          <th rowspan="2">连续判断月数</th>
+          <th rowspan="2">交易日</th>
+          <th rowspan="2">策略实际收益</th>
+          <th rowspan="2">沪深300</th>
+          <th class="return-group-header" colspan="4">四类资产区间收益</th>
+          <th class="contribution-group-header" colspan="4">实际贡献点</th>
+          <th rowspan="2">策略调仓</th>
+          <th rowspan="2">风控动作</th>
+        </tr>
+        <tr>
+          <th class="asset-return-header group-start">股票收益</th>
+          <th class="asset-return-header">商品收益</th>
+          <th class="asset-return-header">可转债收益</th>
+          <th class="asset-return-header group-end">纯债收益</th>
+          <th class="contribution-header group-start">股票贡献</th>
+          <th class="contribution-header">商品贡献</th>
+          <th class="contribution-header">可转债贡献</th>
+          <th class="contribution-header group-end">纯债贡献</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows
+          .map((row) => {
+            const year = row.start.slice(0, 4);
+            const startsYear = yearMode && !renderedYears.has(year);
+            const separatesYear = startsYear && renderedYears.size > 0;
+            const yearCell =
+              startsYear
+                ? `<td class="year-cell" rowspan="${yearCounts[year]}">${year}</td>`
+                : "";
+            renderedYears.add(year);
+            return stageAttributionRow(
+              row,
+              yearCell,
+              separatesYear ? "year-group-start" : "",
+            );
+          })
+          .join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function stageAttributionRow(row, yearCell = "", rowClass = "") {
+  const assetReturnCell = (category) => {
+    const dominant = row.dominantAsset === category;
+    const position = category === "equity" ? "group-start" : category === "pure_bond" ? "group-end" : "";
+    return `
+      <td class="asset-return-cell ${position} ${dominant ? "dominant-cell" : ""} ${returnTone(row[`${category}Return`])}">
+        ${pct(row[`${category}Return`])}
+        ${dominant ? '<span class="advantage-tag">优势</span>' : ""}
+      </td>
+    `;
+  };
+  const contributionCell = (category) => {
+    const dominant = row.dominantAsset === category;
+    const position = category === "equity" ? "group-start" : category === "pure_bond" ? "group-end" : "";
+    return `
+      <td class="contribution-cell ${position} ${dominant ? "dominant-cell" : ""} ${returnTone(row[`${category}Contribution`])}">
+        ${pct(row[`${category}Contribution`])}
+      </td>
+    `;
+  };
+  const rebalanceBreakdown = `${row.strategyRebalances}（${row.stageChanges}+${row.threeMonthRebalances}）`;
+  return `
+    <tr class="${rowClass}">
+      ${yearCell}
+      <td class="period-cell">${escapeHtml(row.period)}</td>
+      <td><span class="stage-chip">Stage ${row.stage}</span></td>
+      <td>
+        <span class="dominant-badge">${escapeHtml(basketLabels[row.dominantAsset] || row.dominantAsset)}</span>
+        <span class="dominant-weight">${pct(row.dominantWeight)}</span>
+      </td>
+      <td><span class="rank-badge">${row.dominantRank}</span></td>
+      <td>${row.consecutiveMonths}</td>
+      <td>${row.tradingDays}</td>
+      <td class="strategy-return-cell ${returnTone(row.strategyReturn)}">${pct(row.strategyReturn)}</td>
+      <td class="${returnTone(row.benchmarkReturn)}">${pct(row.benchmarkReturn)}</td>
+      ${assetReturnCell("equity")}
+      ${assetReturnCell("commodity")}
+      ${assetReturnCell("convertible")}
+      ${assetReturnCell("pure_bond")}
+      ${contributionCell("equity")}
+      ${contributionCell("commodity")}
+      ${contributionCell("convertible")}
+      ${contributionCell("pure_bond")}
+      <td>${rebalanceBreakdown}</td>
+      <td>${row.riskActions}</td>
+    </tr>
+  `;
+}
+
+function returnTone(value) {
+  if (!Number.isFinite(value) || value === 0) return "";
+  return value > 0 ? "positive-value" : "negative-value";
 }
 
 function table(headers, rows) {

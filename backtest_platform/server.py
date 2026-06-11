@@ -24,6 +24,7 @@ ROOT_DIR = APP_DIR.parent
 STATIC_DIR = APP_DIR / "static"
 
 FUND_DIR = ROOT_DIR / "基金"
+FUND_MANAGER_DIR = FUND_DIR / "基金经理"
 INDEX_DIR = ROOT_DIR / "指数"
 ENHANCED_DIR = ROOT_DIR / "增强"
 STRATEGY_DIR = ROOT_DIR / "策略代码"
@@ -35,6 +36,7 @@ CATEGORY_LABELS = {
     "convertible": "可转债",
     "pure_bond": "纯债",
 }
+CATEGORY_PRIORITY = ("equity", "commodity", "convertible", "pure_bond")
 
 STAGE_DOMINANT = {
     1: "convertible",
@@ -47,6 +49,21 @@ STAGE_DOMINANT = {
     8: "convertible",
 }
 
+DEFAULT_STAGE_WEIGHTS = {
+    stage: {
+        category: 0.70 if category == dominant else 0.10
+        for category in CATEGORY_LABELS
+    }
+    for stage, dominant in STAGE_DOMINANT.items()
+}
+
+KST_COMPONENTS = (
+    (20, 10, 1),
+    (60, 20, 2),
+    (120, 30, 3),
+    (240, 40, 4),
+)
+
 
 @dataclass(frozen=True)
 class AssetMeta:
@@ -57,6 +74,10 @@ class AssetMeta:
     start: str
     end: str
     count: int
+    manager: str | None = None
+    roleLabel: str | None = None
+    fullLabel: str | None = None
+    cluster: str | None = None
 
 
 @dataclass
@@ -91,12 +112,23 @@ class DataStore:
         self.assets.clear()
         self.meta.clear()
         self._load_funds()
+        self._load_fund_managers()
         self._load_indexes()
         self._load_enhanced()
         self.pring_df = self._load_pring()
         self.loaded = True
 
-    def _register_asset(self, module: str, code: str, name: str, series: pd.Series) -> None:
+    def _register_asset(
+        self,
+        module: str,
+        code: str,
+        name: str,
+        series: pd.Series,
+        manager: str | None = None,
+        role_label: str | None = None,
+        full_label: str | None = None,
+        cluster: str | None = None,
+    ) -> None:
         series = clean_price_series(series)
         if series.empty:
             return
@@ -115,6 +147,10 @@ class DataStore:
             start=series.index.min().strftime("%Y-%m-%d"),
             end=series.index.max().strftime("%Y-%m-%d"),
             count=int(series.count()),
+            manager=manager,
+            roleLabel=role_label,
+            fullLabel=full_label,
+            cluster=cluster,
         )
 
     def _load_funds(self) -> None:
@@ -134,6 +170,66 @@ class DataStore:
                     name=f"fund:{code}",
                 )
                 self._register_asset("fund", code, name, series)
+
+    def _load_fund_managers(self) -> None:
+        if not FUND_MANAGER_DIR.exists():
+            return
+        csv_files = sorted(FUND_MANAGER_DIR.glob("*.csv"))
+        workbook_files = sorted(FUND_MANAGER_DIR.glob("*.xlsx"))
+        if not csv_files or not workbook_files:
+            raise FileNotFoundError("基金经理目录需要同时包含净值 CSV 和标签配置工作簿")
+
+        workbook = None
+        for file in workbook_files:
+            with pd.ExcelFile(file) as excel_file:
+                if "公募配置池" in excel_file.sheet_names:
+                    workbook = file
+                    break
+        if workbook is None:
+            raise ValueError("基金经理标签工作簿缺少 sheet：公募配置池")
+
+        pool = pd.read_excel(workbook, sheet_name="公募配置池", dtype={"基金代码": str})
+        required = ["基金代码", "基金经理", "基金简称", "角色标签", "完整标签", "标签聚类"]
+        missing = [column for column in required if column not in pool.columns]
+        if missing:
+            raise ValueError(f"公募配置池缺少字段: {', '.join(missing)}")
+        pool = pool.dropna(subset=["基金代码", "基金简称"]).copy()
+        pool["基金代码"] = pool["基金代码"].astype(str).str.strip()
+        pool["基金简称"] = pool["基金简称"].astype(str).str.strip()
+        if pool["基金代码"].duplicated().any():
+            duplicates = sorted(pool.loc[pool["基金代码"].duplicated(keep=False), "基金代码"].unique())
+            raise ValueError(f"公募配置池存在重复基金代码: {'、'.join(duplicates)}")
+        if pool["基金简称"].duplicated().any():
+            duplicates = sorted(pool.loc[pool["基金简称"].duplicated(keep=False), "基金简称"].unique())
+            raise ValueError(f"公募配置池存在重复基金简称: {'、'.join(duplicates)}")
+
+        nav = pd.read_csv(csv_files[0], encoding="utf-8-sig")
+        if nav.shape[1] < 2:
+            raise ValueError("基金经理净值 CSV 至少需要日期列和一只基金净值列")
+        date_column = nav.columns[0]
+        dates = pd.to_datetime(nav[date_column], errors="coerce")
+        nav_names = {str(column).strip(): column for column in nav.columns[1:]}
+        missing_nav = sorted(set(pool["基金简称"]) - set(nav_names))
+        if missing_nav:
+            raise ValueError(f"以下公募配置池基金缺少净值序列: {'、'.join(missing_nav)}")
+
+        for row in pool.itertuples(index=False):
+            name = str(getattr(row, "基金简称")).strip()
+            series = pd.Series(
+                pd.to_numeric(nav[nav_names[name]], errors="coerce").values,
+                index=dates,
+                name=f"manager:{getattr(row, '基金代码')}",
+            )
+            self._register_asset(
+                "manager",
+                str(getattr(row, "基金代码")).strip(),
+                name,
+                series,
+                manager=text_or_none(getattr(row, "基金经理")),
+                role_label=text_or_none(getattr(row, "角色标签")),
+                full_label=text_or_none(getattr(row, "完整标签")),
+                cluster=text_or_none(getattr(row, "标签聚类")),
+            )
 
     def _load_indexes(self) -> None:
         if not INDEX_DIR.exists():
@@ -245,27 +341,31 @@ class DataStore:
 
     def grouped_assets(self) -> dict[str, Any]:
         self.ensure_loaded()
-        groups = {"fund": [], "index": [], "enhanced": []}
+        groups = {"fund": [], "manager": [], "index": [], "enhanced": []}
         for meta in sorted(self.meta.values(), key=lambda x: (x.module, x.name, x.code)):
             groups.setdefault(meta.module, []).append(meta.__dict__)
         return {
             "groups": groups,
             "defaults": self.default_selection(),
+            "defaultStageWeights": default_stage_weights(),
             "pring": self.pring_summary(),
         }
 
     def default_selection(self) -> dict[str, list[str]]:
         code_to_id = {(m.module, m.code): m.id for m in self.meta.values()}
         return {
-            "equity": [code_to_id.get(("fund", "510300.SH"))],
-            "commodity": [
-                code_to_id.get(("fund", "159980.SZ")),
-                code_to_id.get(("fund", "518880.SH")),
-                code_to_id.get(("fund", "159981.SZ")),
-                code_to_id.get(("fund", "159985.SZ")),
+            "equity": [
+                code_to_id.get(("index", "000852.SH")),
+                code_to_id.get(("index", "932000.CSI")),
+                code_to_id.get(("index", "000300.SH")),
+                code_to_id.get(("index", "000905.SH")),
+                code_to_id.get(("index", "399006.SZ")),
             ],
-            "convertible": [code_to_id.get(("fund", "511380.SH"))],
-            "pure_bond": [code_to_id.get(("fund", "166016.SZ"))],
+            "commodity": [
+                code_to_id.get(("index", "NHCI.NH")),
+            ],
+            "convertible": [code_to_id.get(("index", "931078.CSI"))],
+            "pure_bond": [code_to_id.get(("index", "H11001.CSI"))],
         }
 
     def pring_summary(self) -> dict[str, Any]:
@@ -290,6 +390,13 @@ def first_text(series: pd.Series, fallback: str) -> str:
     return text or str(fallback)
 
 
+def text_or_none(value: Any) -> str | None:
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def clean_price_series(series: pd.Series) -> pd.Series:
     s = pd.Series(pd.to_numeric(series.values, errors="coerce"), index=pd.to_datetime(series.index, errors="coerce"))
     s = s[~s.index.isna()].dropna()
@@ -309,6 +416,10 @@ def as_float(value: Any, digits: int | None = 6) -> float | None:
         return round(f, digits) if digits is not None else f
     except Exception:
         return None
+
+
+def percentage_label(value: float) -> str:
+    return f"{value * 100:.2f}".rstrip("0").rstrip(".")
 
 
 def metric(nav: pd.Series, name: str) -> dict[str, Any]:
@@ -359,15 +470,19 @@ def build_category_returns_from_prices(prices: pd.DataFrame, selected: dict[str,
     }
 
 
-def validate_asset_modules(selected: dict[str, list[str]], module: str, source_name: str) -> None:
+def validate_asset_modules(
+    selected: dict[str, list[str]],
+    allowed_modules: set[str],
+    source_name: str,
+    module_label: str,
+) -> None:
     bad = [
         f"{store.meta[asset_id].name}({store.meta[asset_id].code})"
         for ids in selected.values()
         for asset_id in ids
-        if store.meta[asset_id].module != module
+        if store.meta[asset_id].module not in allowed_modules
     ]
     if bad:
-        module_label = {"fund": "基金", "index": "指数"}.get(module, module)
         raise ValueError(f"模拟拼接开启时，{source_name}只能使用{module_label}标的: {'、'.join(bad)}")
 
 
@@ -405,8 +520,8 @@ def prepare_spliced_series(
     splice_selected: dict[str, list[str]],
     first_signal_date: pd.Timestamp,
 ) -> PreparedData:
-    validate_asset_modules(selected, "fund", "主回测篮子")
-    validate_asset_modules(splice_selected, "index", "拼接模拟池")
+    validate_asset_modules(selected, {"fund", "manager"}, "主回测篮子", "基金")
+    validate_asset_modules(splice_selected, {"index"}, "拼接模拟池", "指数")
 
     fund_ids = [asset_id for ids in selected.values() for asset_id in ids]
     index_ids = [asset_id for ids in splice_selected.values() for asset_id in ids]
@@ -481,13 +596,102 @@ def prepare_spliced_series(
     )
 
 
-def stage_target_weights(stage: int) -> dict[str, float]:
+def default_stage_weights() -> dict[str, dict[str, float]]:
+    return {
+        str(stage): dict(weights)
+        for stage, weights in DEFAULT_STAGE_WEIGHTS.items()
+    }
+
+
+def parse_stage_weights(payload: Any) -> dict[int, dict[str, float]]:
+    if payload in (None, {}):
+        return {
+            stage: dict(weights)
+            for stage, weights in DEFAULT_STAGE_WEIGHTS.items()
+        }
+    if not isinstance(payload, dict):
+        raise ValueError("Stage 权重配置必须为对象")
+
+    try:
+        supplied_stages = {int(stage) for stage in payload}
+    except (TypeError, ValueError):
+        raise ValueError("Stage 权重配置只能包含 Stage 1 至 Stage 8") from None
+    expected_stages = set(STAGE_DOMINANT)
+    if supplied_stages != expected_stages:
+        missing = sorted(expected_stages - supplied_stages)
+        extra = sorted(supplied_stages - expected_stages)
+        detail = []
+        if missing:
+            detail.append(f"缺少 Stage {', '.join(map(str, missing))}")
+        if extra:
+            detail.append(f"存在未知 Stage {', '.join(map(str, extra))}")
+        raise ValueError(f"Stage 权重配置不完整：{'；'.join(detail)}")
+
+    parsed: dict[int, dict[str, float]] = {}
+    expected_categories = set(CATEGORY_LABELS)
+    for stage in STAGE_DOMINANT:
+        raw = payload.get(str(stage), payload.get(stage))
+        if not isinstance(raw, dict):
+            raise ValueError(f"Stage {stage} 缺少四类资产权重配置")
+        missing = expected_categories - set(raw)
+        extra = set(raw) - expected_categories
+        if missing or extra:
+            detail = []
+            if missing:
+                detail.append(f"缺少 {'、'.join(CATEGORY_LABELS[key] for key in missing)}")
+            if extra:
+                detail.append(f"存在未知字段 {'、'.join(sorted(extra))}")
+            raise ValueError(f"Stage {stage} 权重字段无效：{'；'.join(detail)}")
+
+        weights: dict[str, float] = {}
+        for category in CATEGORY_LABELS:
+            try:
+                value = float(raw[category])
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Stage {stage} 的{CATEGORY_LABELS[category]}权重必须为数字"
+                ) from None
+            if not math.isfinite(value) or value < 0 or value > 1:
+                raise ValueError(
+                    f"Stage {stage} 的{CATEGORY_LABELS[category]}权重必须在 0% 至 100% 之间"
+                )
+            weights[category] = value
+
+        total = sum(weights.values())
+        if not math.isclose(total, 1.0, abs_tol=1e-6):
+            raise ValueError(f"Stage {stage} 四类资产权重合计必须为 100%，当前为 {total:.2%}")
+        parsed[stage] = weights
+    return parsed
+
+
+def serialize_stage_weights(
+    stage_weights: dict[int, dict[str, float]],
+) -> dict[str, dict[str, float]]:
+    return {
+        str(stage): {
+            category: as_float(weight, 6) or 0.0
+            for category, weight in weights.items()
+        }
+        for stage, weights in stage_weights.items()
+    }
+
+
+def stage_target_weights(
+    stage: int,
+    stage_weights: dict[int, dict[str, float]] | None = None,
+) -> dict[str, float]:
     if stage not in STAGE_DOMINANT:
         raise ValueError(f"不支持的普林格 Stage: {stage}")
-    dominant = STAGE_DOMINANT[stage]
-    weights = {key: 0.10 for key in CATEGORY_LABELS}
-    weights[dominant] = 0.70
-    return weights
+    source = stage_weights or DEFAULT_STAGE_WEIGHTS
+    return dict(source[stage])
+
+
+def dominant_asset_for_stage(
+    stage: int,
+    stage_weights: dict[int, dict[str, float]] | None = None,
+) -> str:
+    weights = stage_target_weights(stage, stage_weights)
+    return max(CATEGORY_PRIORITY, key=lambda category: weights[category])
 
 
 def stage_for_date(pring_df: pd.DataFrame, date: pd.Timestamp) -> int:
@@ -626,14 +830,6 @@ def rebalance_values(
     return main_values, escape_values
 
 
-def reequal_category(
-    values: dict[str, float],
-    ids: list[str],
-) -> None:
-    total = float(sum(values.pop(asset_id, 0.0) for asset_id in ids))
-    values.update(distribute_value(total, ids))
-
-
 def transfer_active_assets(
     main_values: dict[str, float],
     escape_values: dict[str, float],
@@ -648,29 +844,128 @@ def transfer_active_assets(
     return transferred, distribute_value(escape_total, current_active["pure_bond"])
 
 
-def exit_to_pure_bond(
-    main_values: dict[str, float],
-    escape_values: dict[str, float],
-    dominant: str,
-    active: dict[str, list[str]],
-) -> tuple[dict[str, float], dict[str, float]]:
-    sold_value = float(sum(main_values.pop(asset_id, 0.0) for asset_id in active[dominant]))
-    reequal_category(main_values, active["pure_bond"])
-    escape_values = distribute_value(sold_value, active["pure_bond"])
-    return main_values, escape_values
+def build_long_kst(nav: pd.Series) -> pd.DataFrame:
+    result = pd.DataFrame(index=nav.index)
+    components: list[pd.Series] = []
+    for roc_period, smooth_period, weight in KST_COMPONENTS:
+        roc = nav / nav.shift(roc_period) - 1.0
+        smoothed = roc.rolling(window=smooth_period, min_periods=smooth_period).mean()
+        result[f"roc{roc_period}"] = roc
+        result[f"roc{roc_period}Smooth"] = smoothed
+        components.append(smoothed * weight)
+
+    kst = components[0]
+    for component in components[1:]:
+        kst = kst + component
+    result["kst"] = kst
+    result["signal"] = kst.rolling(window=20, min_periods=20).mean()
+    result["slope10"] = kst - kst.shift(10)
+    return result
 
 
-def reenter_from_pure_bond(
-    main_values: dict[str, float],
-    escape_values: dict[str, float],
+def risk_state_for_date(
+    category: str,
+    enabled: bool,
+    nav: pd.Series,
+    ma20: pd.Series,
+    kst: pd.DataFrame,
+    signal_date: pd.Timestamp | None,
+) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "category": category,
+        "targetScale": 1.0,
+        "targetWeight": None,
+        "ma20Above": None,
+        "nav": None,
+        "ma20": None,
+        "kst": None,
+        "kstSignal": None,
+        "kstSlope10": None,
+        "kstReady": False,
+        "kstWeak": None,
+        "status": "disabled" if not enabled else "waiting",
+    }
+    if category not in {"equity", "commodity"} or not enabled or signal_date is None:
+        return state
+
+    nav_value = nav.get(signal_date)
+    ma20_value = ma20.get(signal_date)
+    state["nav"] = as_float(nav_value)
+    state["ma20"] = as_float(ma20_value)
+    if pd.isna(nav_value) or pd.isna(ma20_value):
+        return state
+
+    ma20_above = bool(nav_value >= ma20_value)
+    state["ma20Above"] = ma20_above
+
+    kst_value = kst.at[signal_date, "kst"] if signal_date in kst.index else np.nan
+    signal_value = kst.at[signal_date, "signal"] if signal_date in kst.index else np.nan
+    slope_value = kst.at[signal_date, "slope10"] if signal_date in kst.index else np.nan
+    ready = bool(pd.notna(kst_value) and pd.notna(signal_value) and pd.notna(slope_value))
+    state.update(
+        {
+            "kst": as_float(kst_value),
+            "kstSignal": as_float(signal_value),
+            "kstSlope10": as_float(slope_value),
+            "kstReady": ready,
+        }
+    )
+    if ready:
+        state["kstWeak"] = bool(kst_value < signal_value and slope_value < 0)
+    if ma20_above:
+        state["status"] = "ma20_above"
+        return state
+    if not ready:
+        state["targetScale"] = 0.0
+        state["status"] = "kst_warmup_exit"
+        return state
+
+    weak = bool(state["kstWeak"])
+    state["targetScale"] = 0.0 if weak else 4.0 / 7.0
+    state["status"] = "ma20_below_kst_weak" if weak else "ma20_below_kst_not_weak"
+    return state
+
+
+def risk_adjusted_weights(
+    stage: int,
+    risk_state: dict[str, Any],
+    stage_weights: dict[int, dict[str, float]] | None = None,
+) -> dict[str, float]:
+    weights = stage_target_weights(stage, stage_weights)
+    dominant = dominant_asset_for_stage(stage, stage_weights)
+    if dominant not in {"equity", "commodity"}:
+        return weights
+
+    base_weight = weights[dominant]
+    target = base_weight * float(risk_state.get("targetScale", 1.0))
+    weights[dominant] = target
+    weights["pure_bond"] += base_weight - target
+    return weights
+
+
+def calibrate_risk_pair(
+    values: dict[str, float],
     dominant: str,
     active: dict[str, list[str]],
-) -> tuple[dict[str, float], dict[str, float]]:
-    returned_value = float(sum(escape_values.values()))
-    reequal_category(main_values, active["pure_bond"])
-    existing = float(sum(main_values.pop(asset_id, 0.0) for asset_id in active[dominant]))
-    main_values.update(distribute_value(existing + returned_value, active[dominant]))
-    return main_values, {}
+    target_weight: float,
+) -> float:
+    if dominant not in {"equity", "commodity"}:
+        return category_weights(values, {}, active)[dominant]
+
+    total = float(sum(values.values()))
+    dominant_ids = active[dominant]
+    pure_bond_ids = active["pure_bond"]
+    pair_total = float(
+        sum(values.get(asset_id, 0.0) for asset_id in dominant_ids + pure_bond_ids)
+    )
+    desired_dominant = min(total * target_weight, pair_total)
+    desired_pure_bond = pair_total - desired_dominant
+
+    for asset_id in dominant_ids + pure_bond_ids:
+        values.pop(asset_id, None)
+    values.update(distribute_value(desired_dominant, dominant_ids))
+    values.update(distribute_value(desired_pure_bond, pure_bond_ids))
+    return desired_dominant / total if total else 0.0
 
 
 def apply_returns(
@@ -684,29 +979,67 @@ def apply_returns(
             values[asset_id] *= 1.0 + daily_return
 
 
-def ma20_escape_state(
-    nav: pd.Series,
-    ma20: pd.Series,
-    dates: pd.DatetimeIndex,
-    position: int,
-    currently_escaped: bool,
-    confirmation_days: int,
-) -> bool:
-    end_position = position - 1
-    start_position = end_position - confirmation_days + 1
-    if start_position < 0:
-        return currently_escaped
+def select_backtest_dates(
+    prepared_dates: pd.DatetimeIndex,
+    first_signal_date: pd.Timestamp,
+    date_range_payload: Any,
+) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex, dict[str, str | None]]:
+    available_dates = prepared_dates[prepared_dates > first_signal_date]
+    if available_dates.empty:
+        raise ValueError("首条普林格信号生效后没有共同净值区间")
 
-    signal_dates = dates[start_position : end_position + 1]
-    nav_window = nav.reindex(signal_dates)
-    ma_window = ma20.reindex(signal_dates)
-    if nav_window.isna().any() or ma_window.isna().any():
-        return currently_escaped
+    available_start = pd.Timestamp(available_dates[0])
+    available_end = pd.Timestamp(available_dates[-1])
+    date_range = date_range_payload if isinstance(date_range_payload, dict) else {}
 
-    above = nav_window >= ma_window
-    if currently_escaped:
-        return not bool(above.all())
-    return bool((~above).all())
+    def parse_date(key: str, label: str) -> pd.Timestamp | None:
+        raw = date_range.get(key)
+        if raw in (None, ""):
+            return None
+        parsed = pd.to_datetime(raw, errors="coerce")
+        if pd.isna(parsed):
+            raise ValueError(f"{label}格式无效，应为 YYYY-MM-DD")
+        return pd.Timestamp(parsed).normalize()
+
+    requested_start = parse_date("start", "指定回测开始日期")
+    requested_end = parse_date("end", "指定回测结束日期")
+    if requested_start is not None and requested_start < available_start:
+        raise ValueError(
+            f"指定回测开始日期不能早于共同可用起点 {available_start.strftime('%Y-%m-%d')}"
+        )
+    if requested_start is not None and requested_start > available_end:
+        raise ValueError(
+            f"指定回测开始日期不能晚于共同可用终点 {available_end.strftime('%Y-%m-%d')}"
+        )
+    if requested_end is not None and requested_end > available_end:
+        raise ValueError(
+            f"指定回测结束日期不能晚于共同可用终点 {available_end.strftime('%Y-%m-%d')}"
+        )
+    if requested_end is not None and requested_end < available_start:
+        raise ValueError(
+            f"指定回测结束日期不能早于共同可用起点 {available_start.strftime('%Y-%m-%d')}"
+        )
+    if requested_start is not None and requested_end is not None and requested_start > requested_end:
+        raise ValueError("指定回测开始日期不能晚于结束日期")
+
+    selected_dates = available_dates
+    if requested_start is not None:
+        selected_dates = selected_dates[selected_dates >= requested_start]
+    if requested_end is not None:
+        selected_dates = selected_dates[selected_dates <= requested_end]
+    if len(selected_dates) < 40:
+        raise ValueError("指定回测区间不足 40 个交易日，无法稳定回测")
+
+    return (
+        pd.DatetimeIndex(available_dates),
+        pd.DatetimeIndex(selected_dates),
+        {
+            "start": available_start.strftime("%Y-%m-%d"),
+            "end": available_end.strftime("%Y-%m-%d"),
+            "requestedStart": requested_start.strftime("%Y-%m-%d") if requested_start is not None else None,
+            "requestedEnd": requested_end.strftime("%Y-%m-%d") if requested_end is not None else None,
+        },
+    )
 
 
 def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
@@ -727,14 +1060,12 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         ma20_controls = {
             "equity": bool(ma20_controls_payload.get("equity", False)),
             "commodity": bool(ma20_controls_payload.get("commodity", False)),
-            "convertible": bool(ma20_controls_payload.get("convertible", False)),
         }
     else:
         legacy_enabled = bool(payload.get("ma20Enabled", True))
-        ma20_controls = {"equity": legacy_enabled, "commodity": legacy_enabled, "convertible": False}
+        ma20_controls = {"equity": legacy_enabled, "commodity": legacy_enabled}
     ma20_enabled = any(ma20_controls.values())
-    ma20_three_day = bool(payload.get("ma20ThreeDay", False))
-    ma20_confirmation_days = 3 if ma20_three_day else 1
+    stage_weights = parse_stage_weights(payload.get("stageWeights"))
 
     selected = {
         "equity": equity_ids,
@@ -774,22 +1105,30 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         prepared = prepare_normal_series(selected, all_ids, first_signal_date)
 
-    dates = prepared.dates[prepared.dates > first_signal_date]
-    if len(dates) < 40:
+    all_dates, dates, available_window = select_backtest_dates(
+        prepared.dates,
+        first_signal_date,
+        payload.get("dateRange"),
+    )
+    if len(all_dates) < 40:
         raise ValueError("首条普林格信号生效后的共同区间不足 40 个交易日，无法稳定回测")
     asset_returns = prepared.asset_returns.reindex(dates).fillna(0.0)
-    signal_returns = {
-        key: values.reindex(dates).fillna(0.0)
+    full_signal_returns = {
+        key: values.reindex(all_dates).fillna(0.0)
         for key, values in prepared.signal_returns.items()
     }
 
     signal_nav = {
         key: (1.0 + values).cumprod()
-        for key, values in signal_returns.items()
+        for key, values in full_signal_returns.items()
     }
     signal_ma20 = {
         key: values.rolling(window=20).mean()
         for key, values in signal_nav.items()
+    }
+    signal_kst = {
+        key: build_long_kst(signal_nav[key])
+        for key in ("equity", "commodity")
     }
     events = build_rebalance_events(store.pring_df, dates)
 
@@ -797,8 +1136,8 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     strategy_escape: dict[str, float] = {}
     theory_main: dict[str, float] = {}
     theory_escape: dict[str, float] = {}
-    escape_category: str | None = None
     current_stage: int | None = None
+    current_risk_target = 0.70
     previous_active: dict[str, list[str]] | None = None
 
     strategy_returns: list[float] = []
@@ -807,9 +1146,6 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     theory_nav_values: list[float] = []
     rows: list[dict[str, Any]] = []
     trade_logs: list[dict[str, Any]] = []
-    escape_eq: dict[pd.Timestamp, bool] = {}
-    escape_com: dict[pd.Timestamp, bool] = {}
-    escape_cb: dict[pd.Timestamp, bool] = {}
     weights_history = {"equity": [], "commodity": [], "convertible": [], "pure_bond": []}
     contribution_history = {"equity": [], "commodity": [], "convertible": [], "pure_bond": []}
 
@@ -821,9 +1157,12 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         active: dict[str, list[str]],
         prev_date: pd.Timestamp | None,
         signal_date: pd.Timestamp | None = None,
+        risk_state: dict[str, Any] | None = None,
+        risk_transition: str | None = None,
     ) -> None:
         weights = category_weights(strategy_main, strategy_escape, active)
-        dominant = STAGE_DOMINANT[stage]
+        dominant = dominant_asset_for_stage(stage, stage_weights)
+        risk_state = risk_state or {}
         trade_logs.append(
             {
                 "start": date.strftime("%Y-%m-%d"),
@@ -834,6 +1173,15 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 "stage": stage,
                 "dominantAsset": dominant,
                 "signalDate": signal_date.strftime("%Y-%m-%d") if signal_date is not None else None,
+                "riskSignalDate": prev_date.strftime("%Y-%m-%d") if prev_date is not None else None,
+                "riskTier": as_float(risk_state.get("targetWeight", 0.70), 2),
+                "riskTransition": risk_transition,
+                "ma20Above": risk_state.get("ma20Above"),
+                "kst": risk_state.get("kst"),
+                "kstSignal": risk_state.get("kstSignal"),
+                "kstSlope10": risk_state.get("kstSlope10"),
+                "kstReady": bool(risk_state.get("kstReady", False)),
+                "kstWeak": risk_state.get("kstWeak"),
                 "equityWeight": as_float(weights["equity"], 6),
                 "commodityWeight": as_float(weights["commodity"], 6),
                 "convertibleWeight": as_float(weights["convertible"], 6),
@@ -847,9 +1195,51 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    def current_risk_state(
+        dominant: str,
+        prev_date: pd.Timestamp | None,
+    ) -> dict[str, Any]:
+        if dominant not in {"equity", "commodity"}:
+            state = risk_state_for_date(
+                dominant,
+                False,
+                signal_nav["equity"],
+                signal_ma20["equity"],
+                signal_kst["equity"],
+                prev_date,
+            )
+        else:
+            state = risk_state_for_date(
+                dominant,
+                ma20_controls.get(dominant, False),
+                signal_nav[dominant],
+                signal_ma20[dominant],
+                signal_kst[dominant],
+                prev_date,
+            )
+        base_weight = stage_weights[current_stage][dominant] if current_stage is not None else 0.0
+        state["baseWeight"] = base_weight
+        state["targetWeight"] = base_weight * float(state.get("targetScale", 1.0))
+        return state
+
+    def risk_reason(dominant: str, risk_state: dict[str, Any]) -> str:
+        label = CATEGORY_LABELS[dominant]
+        status = risk_state["status"]
+        target_text = f"{float(risk_state.get('targetWeight', 0.0)):.2%}"
+        if status == "ma20_above":
+            return f"{label}站在MA20上方，优势仓恢复至{target_text}"
+        if status == "kst_warmup_exit":
+            return f"{label}跌破MA20，KST尚未形成，优势仓直接降至0%"
+        if status == "ma20_below_kst_weak":
+            return f"{label}跌破MA20且KST低于Signal、10日斜率为负，优势仓降至0%"
+        if status == "ma20_below_kst_not_weak":
+            return f"{label}跌破MA20但KST未同步转弱，优势仓按基础比例的4/7降至{target_text}"
+        return f"{label}分级风控关闭，优势仓维持{target_text}"
+
     for i, d in enumerate(dates):
         d = pd.Timestamp(d)
-        prev_date = pd.Timestamp(dates[i - 1]) if i > 0 else None
+        all_date_position = all_dates.searchsorted(d)
+        prev_date = pd.Timestamp(all_dates[all_date_position - 1]) if all_date_position > 0 else None
         active = prepared.active_assets(d)
         switched = previous_active is not None and active != previous_active
 
@@ -865,30 +1255,22 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         previous_stage = current_stage
         if event is not None:
             current_stage = int(event["stage"])
-            dominant = STAGE_DOMINANT[current_stage]
-            targets = stage_target_weights(current_stage)
+            dominant = dominant_asset_for_stage(current_stage, stage_weights)
+            risk_state = current_risk_state(dominant, prev_date)
+            targets = risk_adjusted_weights(current_stage, risk_state, stage_weights)
             strategy_total = portfolio_total(strategy_main, strategy_escape) or 1.0
             theory_total = portfolio_total(theory_main, theory_escape) or 1.0
-            should_escape = (
-                dominant != "pure_bond"
-                and ma20_controls.get(dominant, False)
-                and ma20_escape_state(
-                    signal_nav[dominant],
-                    signal_ma20[dominant],
-                    dates,
-                    i,
-                    escape_category == dominant,
-                    ma20_confirmation_days,
-                )
-            )
             strategy_main, strategy_escape = rebalance_values(
                 strategy_total,
                 targets,
                 active,
-                dominant if should_escape else None,
             )
-            theory_main, theory_escape = rebalance_values(theory_total, targets, active)
-            escape_category = dominant if should_escape else None
+            theory_main, theory_escape = rebalance_values(
+                theory_total,
+                stage_target_weights(current_stage, stage_weights),
+                active,
+            )
+            current_risk_target = float(risk_state["targetWeight"])
 
             if event["type"] == "initial":
                 reason = f"初始建仓：Stage {current_stage}，重仓{CATEGORY_LABELS[dominant]}"
@@ -901,9 +1283,8 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 reason = f"连续3个月未进行策略调仓，执行再平衡：Stage {current_stage}，重仓{CATEGORY_LABELS[dominant]}"
             if switched:
                 reason += " + 模拟拼接切换至基金"
-            if should_escape:
-                confirmation_text = "连续3日位于MA20下方" if ma20_three_day else "位于MA20下方"
-                reason += f" + {CATEGORY_LABELS[dominant]}{confirmation_text}，70%优势仓转入纯债"
+            if dominant in {"equity", "commodity"} and ma20_controls.get(dominant, False):
+                reason += f" + {risk_reason(dominant, risk_state)}"
             append_trade(
                 d,
                 event["type"],
@@ -912,11 +1293,13 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 active,
                 prev_date,
                 event.get("signal_date"),
+                risk_state,
             )
         else:
             if current_stage is None:
                 current_stage = stage_for_date(store.pring_df, d)
-            dominant = STAGE_DOMINANT[current_stage]
+            dominant = dominant_asset_for_stage(current_stage, stage_weights)
+            risk_state = current_risk_state(dominant, prev_date)
             if switched:
                 append_trade(
                     d,
@@ -925,53 +1308,39 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                     current_stage,
                     active,
                     prev_date,
+                    risk_state=risk_state,
                 )
 
-            should_escape = (
-                dominant != "pure_bond"
+            next_risk_target = float(risk_state["targetWeight"])
+            if (
+                dominant in {"equity", "commodity"}
                 and ma20_controls.get(dominant, False)
-                and ma20_escape_state(
-                    signal_nav[dominant],
-                    signal_ma20[dominant],
-                    dates,
-                    i,
-                    escape_category == dominant,
-                    ma20_confirmation_days,
+                and not math.isclose(next_risk_target, current_risk_target, abs_tol=1e-12)
+            ):
+                previous_target = current_risk_target
+                applied_target = calibrate_risk_pair(
+                    strategy_main,
+                    dominant,
+                    active,
+                    next_risk_target,
                 )
-            )
-            if should_escape and escape_category is None:
-                strategy_main, strategy_escape = exit_to_pure_bond(
-                    strategy_main, strategy_escape, dominant, active
+                current_risk_target = next_risk_target
+                transition = (
+                    f"{percentage_label(previous_target)}→"
+                    f"{percentage_label(next_risk_target)}"
                 )
-                escape_category = dominant
+                reason = risk_reason(dominant, risk_state)
+                if not math.isclose(applied_target, next_risk_target, abs_tol=1e-8):
+                    reason += f"；受优势资产与纯债可用市值约束，实际校准至{applied_target:.1%}"
                 append_trade(
                     d,
-                    "ma20_exit",
-                    (
-                        f"{CATEGORY_LABELS[dominant]}优势仓连续3日低于MA20，全部撤退至纯债"
-                        if ma20_three_day
-                        else f"{CATEGORY_LABELS[dominant]}优势仓跌破MA20，全部撤退至纯债"
-                    ),
+                    "risk_tier",
+                    reason,
                     current_stage,
                     active,
                     prev_date,
-                )
-            elif not should_escape and escape_category == dominant:
-                strategy_main, strategy_escape = reenter_from_pure_bond(
-                    strategy_main, strategy_escape, dominant, active
-                )
-                escape_category = None
-                append_trade(
-                    d,
-                    "ma20_reentry",
-                    (
-                        f"{CATEGORY_LABELS[dominant]}优势仓连续3日站上MA20，避险份额原路买回"
-                        if ma20_three_day
-                        else f"{CATEGORY_LABELS[dominant]}优势仓收复MA20，避险份额原路买回"
-                    ),
-                    current_stage,
-                    active,
-                    prev_date,
+                    risk_state=risk_state,
+                    risk_transition=transition,
                 )
 
         strategy_start = portfolio_total(strategy_main, strategy_escape)
@@ -1000,9 +1369,6 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         weights = category_weights(strategy_main, strategy_escape, active)
         for key in weights_history:
             weights_history[key].append(weights[key])
-        escape_eq[d] = escape_category == "equity"
-        escape_com[d] = escape_category == "commodity"
-        escape_cb[d] = escape_category == "convertible"
 
         rows.append(
             {
@@ -1011,9 +1377,9 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 "commodityWeight": as_float(weights["commodity"], 6),
                 "convertibleWeight": as_float(weights["convertible"], 6),
                 "pureBondWeight": as_float(weights["pure_bond"], 6),
-                "equityEscape": escape_eq[d],
-                "commodityEscape": escape_com[d],
-                "convertibleEscape": escape_cb[d],
+                "riskTier": as_float(current_risk_target, 2),
+                "ma20Above": risk_state.get("ma20Above"),
+                "kstWeak": risk_state.get("kstWeak"),
                 "stage": current_stage,
                 "dominantAsset": dominant,
             }
@@ -1027,14 +1393,15 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
 
     benchmark_series = find_benchmark_series()
     benchmark_prices = (
-        benchmark_series.reindex(prepared.raw_prices.index.union(dates))
+        benchmark_series.reindex(prepared.raw_prices.index.union(all_dates))
         .sort_index()
         .ffill()
-        .reindex(dates)
+        .reindex(all_dates)
         .dropna()
     )
-    if len(benchmark_prices) == len(dates):
-        benchmark_ret = benchmark_prices.pct_change(fill_method=None).fillna(0.0)
+    if len(benchmark_prices) == len(all_dates):
+        benchmark_ret = benchmark_prices.pct_change(fill_method=None).fillna(0.0).reindex(dates)
+        benchmark_ret.loc[dates[0]] = 0.0
         nav_benchmark = (1 + benchmark_ret).cumprod()
     else:
         nav_benchmark = nav_theory * np.nan
@@ -1053,19 +1420,51 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     df_daily["Year"] = df_daily.index.year
 
     annual = build_annual_attribution(df_daily)
+    stage_attribution = build_stage_attribution(
+        dates=dates,
+        stages=pd.Series([row["stage"] for row in rows], index=dates),
+        category_returns={
+            category: returns.reindex(dates).fillna(0.0)
+            for category, returns in full_signal_returns.items()
+        },
+        df_daily=df_daily,
+        trade_logs=trade_logs,
+        pring_df=store.pring_df,
+        stage_weights=stage_weights,
+    )
+    year_stage_attribution = build_stage_attribution(
+        dates=dates,
+        stages=pd.Series([row["stage"] for row in rows], index=dates),
+        category_returns={
+            category: returns.reindex(dates).fillna(0.0)
+            for category, returns in full_signal_returns.items()
+        },
+        df_daily=df_daily,
+        trade_logs=trade_logs,
+        pring_df=store.pring_df,
+        stage_weights=stage_weights,
+        split_by_year=True,
+    )
     contribution = build_contribution_summary(df_daily)
     efficiency = build_efficiency(weights_history, contribution, dates)
-    escape_diagnostics = {
-        "equity": build_escape_diagnostics(
-            signal_returns["equity"], signal_returns["pure_bond"], escape_eq, dates
-        ),
-        "commodity": build_escape_diagnostics(
-            signal_returns["commodity"], signal_returns["pure_bond"], escape_com, dates
-        ),
-        "convertible": build_escape_diagnostics(
-            signal_returns["convertible"], signal_returns["pure_bond"], escape_cb, dates
-        ),
-    }
+    risk_diagnostics = [
+        {
+            "date": log["start"],
+            "asset": log["dominantAsset"],
+            "transition": log["riskTransition"],
+            "riskTier": log["riskTier"],
+            "signalDate": log["riskSignalDate"],
+            "ma20Above": log["ma20Above"],
+            "kst": log["kst"],
+            "kstSignal": log["kstSignal"],
+            "kstSlope10": log["kstSlope10"],
+            "kstReady": log["kstReady"],
+            "kstWeak": log["kstWeak"],
+            "reason": log["reason"],
+        }
+        for log in trade_logs
+        if log["rebalanceType"] == "risk_tier"
+    ]
 
     drawdown_strategy = nav_strategy / nav_strategy.cummax() - 1
     drawdown_benchmark = nav_benchmark / nav_benchmark.cummax() - 1 if nav_benchmark.notna().any() else nav_benchmark
@@ -1087,6 +1486,7 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     }
     stage_rebalance_count = sum(log["rebalanceType"] == "stage_change" for log in trade_logs)
     three_month_rebalance_count = sum(log["rebalanceType"] == "three_month" for log in trade_logs)
+    risk_action_count = sum(log["rebalanceType"] == "risk_tier" for log in trade_logs)
 
     return {
         "window": {
@@ -1095,9 +1495,10 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             "days": int(len(dates)),
             "firstSignalDate": first_signal_date.strftime("%Y-%m-%d"),
         },
+        "availableWindow": available_window,
         "ma20Enabled": ma20_enabled,
         "ma20Controls": ma20_controls,
-        "ma20ThreeDay": ma20_three_day,
+        "stageWeights": serialize_stage_weights(stage_weights),
         "metrics": [
             metric(nav_strategy, "策略实盘版"),
             metric(nav_theory, "理论无风控"),
@@ -1110,12 +1511,15 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             "stageChanges": stage_rebalance_count,
             "threeMonth": three_month_rebalance_count,
             "initialBuild": 1 if trade_logs else 0,
-            "ma20Actions": sum(log["rebalanceType"].startswith("ma20") for log in trade_logs),
+            "riskActions": risk_action_count,
+            "ma20Actions": risk_action_count,
         },
         "annualAttribution": annual,
+        "stageAttribution": stage_attribution,
+        "yearStageAttribution": year_stage_attribution,
         "contributionSummary": contribution,
         "efficiency": efficiency,
-        "escapeDiagnostics": escape_diagnostics,
+        "riskDiagnostics": risk_diagnostics,
         "selectedAssets": selected_assets,
         "spliceSummary": prepared.splice_summary,
         "spliceContext": prepared.splice_context,
@@ -1145,6 +1549,124 @@ def build_annual_attribution(df_daily: pd.DataFrame) -> list[dict[str, Any]]:
                 "pureBond": as_float((group["Cdb"] * group["Prev_NAV"]).sum() / start_nav),
             }
         )
+    return rows
+
+
+def build_stage_attribution(
+    dates: pd.DatetimeIndex,
+    stages: pd.Series,
+    category_returns: dict[str, pd.Series],
+    df_daily: pd.DataFrame,
+    trade_logs: list[dict[str, Any]],
+    pring_df: pd.DataFrame,
+    stage_weights: dict[int, dict[str, float]],
+    split_by_year: bool = False,
+) -> list[dict[str, Any]]:
+    if dates.empty:
+        return []
+
+    pring = pring_df.sort_values("signal_date").reset_index(drop=True).copy()
+    pring["runId"] = pring["stage"].ne(pring["stage"].shift()).cumsum()
+    log_rows = [
+        {**log, "_date": pd.Timestamp(log["start"])}
+        for log in trade_logs
+    ]
+    stage_series = stages.reindex(dates).astype(int)
+    segment_breaks = stage_series.ne(stage_series.shift())
+    if split_by_year:
+        years = pd.Series(stage_series.index.year, index=stage_series.index)
+        segment_breaks |= years.ne(years.shift())
+    run_ids = segment_breaks.cumsum()
+    contribution_columns = {
+        "equity": "Eq",
+        "commodity": "Com",
+        "convertible": "Cb",
+        "pure_bond": "Cdb",
+    }
+
+    rows: list[dict[str, Any]] = []
+    for _, segment_stages in stage_series.groupby(run_ids):
+        segment_dates = pd.DatetimeIndex(segment_stages.index)
+        start = pd.Timestamp(segment_dates[0])
+        end = pd.Timestamp(segment_dates[-1])
+        stage = int(segment_stages.iloc[0])
+        dominant = dominant_asset_for_stage(stage, stage_weights)
+        segment_daily = df_daily.loc[segment_dates]
+        segment_start_nav = float(segment_daily["Prev_NAV"].iloc[0])
+
+        eligible_signals = pring.loc[pring["signal_date"] < start]
+        if eligible_signals.empty:
+            signal_start = None
+            signal_end = None
+            consecutive_months = 0
+        else:
+            active_signal = eligible_signals.iloc[-1]
+            run = pring.loc[pring["runId"] == active_signal["runId"]]
+            if split_by_year:
+                observed_run = run.loc[
+                    (run["signal_date"] >= active_signal["signal_date"])
+                    & (run["signal_date"] <= end)
+                ]
+                signal_start = pd.Timestamp(active_signal["signal_date"])
+            else:
+                observed_run = run.loc[run["signal_date"] <= end]
+                signal_start = pd.Timestamp(run["signal_date"].iloc[0])
+            signal_end = (
+                pd.Timestamp(observed_run["signal_date"].iloc[-1])
+                if not observed_run.empty
+                else signal_start
+            )
+            consecutive_months = int(len(observed_run))
+
+        segment_logs = [
+            log for log in log_rows
+            if start <= log["_date"] <= end
+        ]
+        stage_changes = sum(log["rebalanceType"] == "stage_change" for log in segment_logs)
+        three_month = sum(log["rebalanceType"] == "three_month" for log in segment_logs)
+        risk_actions = sum(log["rebalanceType"] == "risk_tier" for log in segment_logs)
+
+        row: dict[str, Any] = {
+            "period": f"{start.strftime('%Y-%m-%d')} ~ {end.strftime('%Y-%m-%d')}",
+            "start": start.strftime("%Y-%m-%d"),
+            "end": end.strftime("%Y-%m-%d"),
+            "signalStartDate": signal_start.strftime("%Y-%m-%d") if signal_start is not None else None,
+            "signalEndDate": signal_end.strftime("%Y-%m-%d") if signal_end is not None else None,
+            "stage": stage,
+            "dominantAsset": dominant,
+            "dominantWeight": as_float(stage_weights[stage][dominant]),
+            "consecutiveMonths": consecutive_months,
+            "tradingDays": int(len(segment_dates)),
+            "strategyReturn": as_float((1.0 + segment_daily["Strat"]).prod() - 1.0),
+            "benchmarkReturn": as_float((1.0 + segment_daily["Benchmark"]).prod() - 1.0),
+            "stageChanges": stage_changes,
+            "threeMonthRebalances": three_month,
+            "strategyRebalances": stage_changes + three_month,
+            "riskActions": risk_actions,
+        }
+        engine_returns: dict[str, float] = {}
+        for category in CATEGORY_PRIORITY:
+            engine_return = (
+                (1.0 + category_returns[category].reindex(segment_dates).fillna(0.0)).prod()
+                - 1.0
+            )
+            engine_returns[category] = float(engine_return)
+            contribution = (
+                segment_daily[contribution_columns[category]]
+                * segment_daily["Prev_NAV"]
+            ).sum() / segment_start_nav
+            row[f"{category}Return"] = as_float(engine_return)
+            row[f"{category}Contribution"] = as_float(contribution)
+
+        ranked_assets = sorted(
+            CATEGORY_PRIORITY,
+            key=lambda category: (
+                -engine_returns[category],
+                CATEGORY_PRIORITY.index(category),
+            ),
+        )
+        row["dominantRank"] = ranked_assets.index(dominant) + 1
+        rows.append(row)
     return rows
 
 
@@ -1198,45 +1720,6 @@ def build_efficiency(weights_history: dict[str, list[float]], contribution: dict
             }
         )
     return rows
-
-
-def build_escape_diagnostics(
-    asset_returns: pd.Series,
-    pure_bond_returns: pd.Series,
-    escape_flags: dict[pd.Timestamp, bool],
-    dates: pd.Index,
-) -> list[dict[str, Any]]:
-    diagnostics: list[dict[str, Any]] = []
-    in_escape = False
-    start: pd.Timestamp | None = None
-    asset_nav = (1 + asset_returns).cumprod()
-    cdb_nav = (1 + pure_bond_returns).cumprod()
-    previous_date: pd.Timestamp | None = None
-
-    for d in dates:
-        escaping = escape_flags.get(d, False)
-        if escaping and not in_escape:
-            in_escape = True
-            start = d
-        elif not escaping and in_escape and start is not None:
-            end = previous_date or d
-            slice_nav = asset_nav.loc[(asset_nav.index >= start) & (asset_nav.index <= end)]
-            if len(slice_nav) > 1:
-                diagnostics.append(
-                    {
-                        "start": start.strftime("%Y-%m-%d"),
-                        "end": end.strftime("%Y-%m-%d"),
-                        "days": int((end - start).days),
-                        "avoidedDrawdown": as_float(slice_nav.min() / slice_nav.iloc[0] - 1),
-                        "missedRunup": as_float(slice_nav.max() / slice_nav.iloc[0] - 1),
-                        "assetReturn": as_float(slice_nav.iloc[-1] / slice_nav.iloc[0] - 1),
-                        "pureBondReturn": as_float(cdb_nav.loc[end] / cdb_nav.loc[start] - 1),
-                    }
-                )
-            in_escape = False
-            start = None
-        previous_date = d
-    return diagnostics
 
 
 class Handler(BaseHTTPRequestHandler):

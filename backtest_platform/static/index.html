@@ -4,16 +4,38 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>底层资产回测平台</title>
-    <link rel="stylesheet" href="/styles.css?v=20260611-7" />
+    <link rel="stylesheet" href="styles.css?v=20260612-4" />
   </head>
   <body>
     <header class="topbar">
-      <div>
-        <p class="eyebrow">Plinger Strategy Lab</p>
-        <h1>底层资产回测平台</h1>
+      <div class="topbar-main">
+        <div>
+          <p class="eyebrow">Plinger Strategy Lab</p>
+          <h1>底层资产回测平台</h1>
+        </div>
+        <div class="top-actions">
+          <button id="saveStrategyBtn" class="ghost-btn workspace-only" type="button" disabled>保存策略</button>
+          <button id="strategyLibraryBtn" class="ghost-btn" type="button">策略库</button>
+          <button id="workspaceNavBtn" class="ghost-btn library-only hidden" type="button">返回工作台</button>
+          <button id="clearBtn" class="ghost-btn danger-btn workspace-only" type="button">清空篮子</button>
+          <button id="resetBtn" class="ghost-btn workspace-only" type="button">恢复默认</button>
+          <button id="runBtn" class="primary-btn workspace-only" type="button">运行回测</button>
+        </div>
       </div>
-      <div class="top-actions">
-        <div class="control-group workspace-only" aria-label="MA20 + KST 风控设置">
+
+      <section class="settings-bar workspace-only" aria-label="回测设置">
+        <div class="settings-heading">
+          <span>回测设置</span>
+          <small>基准、风控与资产倾向</small>
+        </div>
+        <div class="benchmark-control">
+          <span class="control-title">对照基准</span>
+          <button id="benchmarkBtn" class="benchmark-btn" type="button">
+            <span id="benchmarkName">沪深300</span>
+            <small id="benchmarkCode">000300.SH · 指数</small>
+          </button>
+        </div>
+        <div class="control-group" aria-label="MA20 + KST 风控设置">
           <span class="control-title">MA20 + KST 风控</span>
           <label class="check-pill">
             <input id="ma20Equity" type="checkbox" />
@@ -24,7 +46,7 @@
             <span>商品优势</span>
           </label>
         </div>
-        <div class="stage-control-stack workspace-only">
+        <div class="stage-control-stack">
           <button id="stageSettingsBtn" class="ghost-btn" type="button">Stage 比例</button>
           <div class="stage-tilt-control" aria-label="股债倾向">
             <div id="stageProfileSwitch" class="stage-tilt-track"></div>
@@ -35,13 +57,7 @@
             </div>
           </div>
         </div>
-        <button id="saveStrategyBtn" class="ghost-btn workspace-only" type="button" disabled>保存策略</button>
-        <button id="strategyLibraryBtn" class="ghost-btn" type="button">策略库</button>
-        <button id="workspaceNavBtn" class="ghost-btn library-only hidden" type="button">返回工作台</button>
-        <button id="clearBtn" class="ghost-btn danger-btn workspace-only" type="button">清空篮子</button>
-        <button id="resetBtn" class="ghost-btn workspace-only" type="button">恢复默认</button>
-        <button id="runBtn" class="primary-btn workspace-only" type="button">运行回测</button>
-      </div>
+      </section>
     </header>
 
     <main id="workspaceView" class="shell">
@@ -156,7 +172,7 @@
             <article class="chart-card wide">
               <div class="chart-title">
                 <h3>净值曲线</h3>
-                <span>策略 / 理论无风控 / 沪深300</span>
+                <span id="navChartSubtitle">策略 / 理论无风控 / 沪深300</span>
               </div>
               <canvas id="navChart" height="280"></canvas>
             </article>
@@ -177,14 +193,14 @@
             <article class="chart-card wide">
               <div class="chart-title">
                 <h3>年度收益大比拼</h3>
-                <span>策略 vs 沪深300</span>
+                <span id="annualReturnSubtitle">策略 vs 沪深300</span>
               </div>
               <canvas id="annualReturnChart" height="270"></canvas>
             </article>
             <article class="chart-card wide">
               <div class="chart-title">
                 <h3>年度贡献拆解</h3>
-                <span>四类资产驱动力 vs 沪深300</span>
+                <span id="annualContributionSubtitle">四类资产驱动力 vs 沪深300</span>
               </div>
               <canvas id="annualContributionChart" height="270"></canvas>
             </article>
@@ -231,6 +247,29 @@
         </section>
       </section>
     </main>
+
+    <div id="benchmarkModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="benchmarkModalTitle">
+      <section class="modal-dialog benchmark-modal-dialog">
+        <header class="modal-head">
+          <div>
+            <h2 id="benchmarkModalTitle">选择对照基准</h2>
+            <p class="modal-subtitle">资产库中的任意标的都可以作为回测对照。</p>
+          </div>
+          <button id="closeBenchmarkModalBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button>
+        </header>
+        <div class="benchmark-toolbar">
+          <input id="benchmarkSearchInput" class="search" type="search" placeholder="搜索名称、代码、经理或标签" />
+          <select id="benchmarkModuleFilter" class="select-control" aria-label="基准资产类型">
+            <option value="">全部类型</option>
+            <option value="fund">基金</option>
+            <option value="manager">基金经理</option>
+            <option value="index">指数</option>
+            <option value="enhanced">增强</option>
+          </select>
+        </div>
+        <div id="benchmarkList" class="benchmark-list"></div>
+      </section>
+    </div>
 
     <main id="strategyLibraryView" class="strategy-library-view hidden">
       <section class="strategy-library-head">
@@ -352,6 +391,6 @@
       </section>
     </div>
 
-    <script src="/app.js?v=20260611-7"></script>
+    <script src="app.js?v=20260612-4"></script>
   </body>
 </html>

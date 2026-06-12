@@ -32,7 +32,16 @@ const colors = {
 };
 
 const categoryOrder = ["equity", "commodity", "convertible", "pure_bond"];
+const managerClusterOrder = ["进攻弹性", "核心稳健", "防守压仓", "未分类"];
 const stageNumbers = [1, 2, 3, 4, 5, 6, 7, 8];
+const fallbackBenchmarkId = "index:000300.SH";
+const expectedApiVersion = "2026.06.12.3";
+const appBaseUrl = new URL(".", window.location.href);
+const topbar = document.querySelector(".topbar");
+
+function appUrl(path) {
+  return new URL(String(path).replace(/^\/+/, ""), appBaseUrl).toString();
+}
 
 const state = {
   grouped: { fund: [], manager: [], index: [], enhanced: [] },
@@ -51,6 +60,8 @@ const state = {
     pure_bond: [],
   },
   defaults: null,
+  defaultBenchmarkId: fallbackBenchmarkId,
+  benchmarkId: fallbackBenchmarkId,
   defaultStageWeights: null,
   stageWeightProfiles: {},
   stageWeights: null,
@@ -72,6 +83,14 @@ const els = {
   assetCount: document.getElementById("assetCount"),
   assetList: document.getElementById("assetList"),
   searchInput: document.getElementById("searchInput"),
+  benchmarkBtn: document.getElementById("benchmarkBtn"),
+  benchmarkName: document.getElementById("benchmarkName"),
+  benchmarkCode: document.getElementById("benchmarkCode"),
+  benchmarkModal: document.getElementById("benchmarkModal"),
+  closeBenchmarkModalBtn: document.getElementById("closeBenchmarkModalBtn"),
+  benchmarkSearchInput: document.getElementById("benchmarkSearchInput"),
+  benchmarkModuleFilter: document.getElementById("benchmarkModuleFilter"),
+  benchmarkList: document.getElementById("benchmarkList"),
   runBtn: document.getElementById("runBtn"),
   resetBtn: document.getElementById("resetBtn"),
   clearBtn: document.getElementById("clearBtn"),
@@ -96,6 +115,9 @@ const els = {
   results: document.getElementById("results"),
   metrics: document.getElementById("metrics"),
   windowText: document.getElementById("windowText"),
+  navChartSubtitle: document.getElementById("navChartSubtitle"),
+  annualReturnSubtitle: document.getElementById("annualReturnSubtitle"),
+  annualContributionSubtitle: document.getElementById("annualContributionSubtitle"),
   stageAttributionHint: document.getElementById("stageAttributionHint"),
   stageAttributionTable: document.getElementById("stageAttributionTable"),
   annualTable: document.getElementById("annualTable"),
@@ -141,13 +163,21 @@ const els = {
 init();
 
 async function init() {
+  observeTopbarHeight();
   wireEvents();
   try {
-    const res = await fetch("/api/assets");
+    const res = await fetch(appUrl("api/assets"));
     if (!res.ok) throw new Error("资产库加载失败");
     const data = await res.json();
+    if (data.apiVersion !== expectedApiVersion) {
+      throw new Error(
+        `服务版本不一致（页面 ${expectedApiVersion}，后端 ${data.apiVersion || "旧版本"}），请重新运行 start_backtest_platform.ps1。`,
+      );
+    }
     state.grouped = data.groups;
     state.defaults = data.defaults;
+    state.defaultBenchmarkId = data.defaultBenchmarkId || fallbackBenchmarkId;
+    state.benchmarkId = state.defaultBenchmarkId;
     state.defaultStageWeights = cloneWeights(data.defaultStageWeights);
     state.stageWeightProfiles = data.stageWeightProfiles || {};
     state.stageWeights = cloneWeights(data.defaultStageWeights);
@@ -156,6 +186,7 @@ async function init() {
     updateStageSettingsButton();
     state.pring = data.pring;
     Object.values(state.grouped).flat().forEach((asset) => state.assetsById.set(asset.id, asset));
+    renderBenchmarkControl();
     resetDefaults();
     renderAssets();
     await loadStrategyLibrary();
@@ -169,6 +200,21 @@ async function init() {
   }
 }
 
+function observeTopbarHeight() {
+  const syncHeight = () => {
+    document.documentElement.style.setProperty(
+      "--topbar-height",
+      `${topbar.offsetHeight}px`,
+    );
+  };
+  syncHeight();
+  if ("ResizeObserver" in window) {
+    new ResizeObserver(syncHeight).observe(topbar);
+  } else {
+    window.addEventListener("resize", syncHeight);
+  }
+}
+
 function wireEvents() {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -179,6 +225,14 @@ function wireEvents() {
   });
 
   els.searchInput.addEventListener("input", renderAssets);
+  els.benchmarkBtn.addEventListener("click", openBenchmarkModal);
+  els.closeBenchmarkModalBtn.addEventListener("click", closeBenchmarkModal);
+  els.benchmarkSearchInput.addEventListener("input", renderBenchmarkList);
+  els.benchmarkModuleFilter.addEventListener("change", renderBenchmarkList);
+  els.benchmarkList.addEventListener("click", handleBenchmarkSelection);
+  els.benchmarkModal.addEventListener("click", (event) => {
+    if (event.target === els.benchmarkModal) closeBenchmarkModal();
+  });
   els.resetBtn.addEventListener("click", resetDefaults);
   els.clearBtn.addEventListener("click", clearBaskets);
   els.stageSettingsBtn.addEventListener("click", openStageSettings);
@@ -192,6 +246,9 @@ function wireEvents() {
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !els.stageSettingsModal.classList.contains("hidden")) {
       closeStageSettings();
+    }
+    if (event.key === "Escape" && !els.benchmarkModal.classList.contains("hidden")) {
+      closeBenchmarkModal();
     }
   });
   els.runBtn.addEventListener("click", runBacktest);
@@ -249,6 +306,8 @@ function wireEvents() {
 
 function resetDefaults() {
   if (!state.defaults) return;
+  state.benchmarkId = state.defaultBenchmarkId;
+  renderBenchmarkControl();
   els.spliceToggle.checked = false;
   state.spliceBaskets = emptyBaskets();
   state.baskets = {
@@ -284,6 +343,95 @@ function emptyBaskets() {
   };
 }
 
+function renderBenchmarkControl() {
+  const asset = state.assetsById.get(state.benchmarkId);
+  if (!asset) {
+    els.benchmarkName.textContent = "基准不可用";
+    els.benchmarkCode.textContent = state.benchmarkId || "-";
+    els.benchmarkBtn.classList.add("missing");
+    return;
+  }
+  els.benchmarkName.textContent = asset.name;
+  els.benchmarkCode.textContent = `${asset.code} · ${moduleLabels[asset.module]}`;
+  els.benchmarkBtn.title = `${asset.name}（${asset.code}）`;
+  els.benchmarkBtn.classList.remove("missing");
+}
+
+function openBenchmarkModal() {
+  els.benchmarkSearchInput.value = "";
+  els.benchmarkModuleFilter.value = "";
+  renderBenchmarkList();
+  openModal(els.benchmarkModal);
+  els.benchmarkSearchInput.focus();
+}
+
+function closeBenchmarkModal() {
+  els.benchmarkModal.classList.add("hidden");
+  syncModalBodyState();
+}
+
+function renderBenchmarkList() {
+  const query = els.benchmarkSearchInput.value.trim().toLowerCase();
+  const moduleFilter = els.benchmarkModuleFilter.value;
+  const assets = Object.values(state.grouped)
+    .flat()
+    .filter((asset) => {
+      if (moduleFilter && asset.module !== moduleFilter) return false;
+      const haystack = [
+        asset.name,
+        asset.code,
+        asset.manager,
+        asset.cluster,
+        asset.roleLabel,
+        asset.fullLabel,
+        moduleLabels[asset.module],
+        basketLabels[asset.category],
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return !query || haystack.includes(query);
+    })
+    .sort((left, right) => (
+      left.module.localeCompare(right.module)
+      || left.name.localeCompare(right.name, "zh-CN")
+      || left.code.localeCompare(right.code)
+    ));
+
+  if (!assets.length) {
+    els.benchmarkList.innerHTML = `<div class="empty-state">没有匹配的基准标的</div>`;
+    return;
+  }
+
+  els.benchmarkList.innerHTML = assets.map((asset) => `
+    <button
+      class="benchmark-option${asset.id === state.benchmarkId ? " selected" : ""}"
+      type="button"
+      data-benchmark-id="${escapeHtml(asset.id)}"
+    >
+      <span class="benchmark-option-main">
+        <strong>${escapeHtml(asset.name)}</strong>
+        <small>${escapeHtml(asset.code)}${asset.manager ? ` · ${escapeHtml(asset.manager)}` : ""}</small>
+      </span>
+      <span class="benchmark-option-meta">
+        <span>${escapeHtml(moduleLabels[asset.module])}${asset.category ? ` · ${escapeHtml(basketLabels[asset.category])}` : ""}</span>
+        <small>${asset.start} 至 ${asset.end}</small>
+      </span>
+    </button>
+  `).join("");
+}
+
+function handleBenchmarkSelection(event) {
+  const option = event.target.closest("[data-benchmark-id]");
+  if (!option) return;
+  const assetId = option.dataset.benchmarkId;
+  if (!state.assetsById.has(assetId)) return;
+  state.benchmarkId = assetId;
+  renderBenchmarkControl();
+  closeBenchmarkModal();
+  configChanged();
+}
+
 function renderAssets() {
   const query = els.searchInput.value.trim().toLowerCase();
   const assets = (state.grouped[state.activeTab] || []).filter((asset) => {
@@ -302,13 +450,23 @@ function renderAssets() {
     return !query || haystack.includes(query);
   });
 
-  const breakdown = categoryOrder
+  const categoryBreakdown = categoryOrder
     .map((category) => {
       const count = assets.filter((asset) => asset.category === category).length;
       return count ? `${basketLabels[category]} ${count}` : "";
     })
     .filter(Boolean)
     .join(" · ");
+  const managerBreakdown = managerClusterOrder
+    .map((cluster) => {
+      const count = assets.filter(
+        (asset) => (asset.cluster || "未分类") === cluster,
+      ).length;
+      return count ? `${cluster} ${count}` : "";
+    })
+    .filter(Boolean)
+    .join(" · ");
+  const breakdown = state.activeTab === "manager" ? managerBreakdown : categoryBreakdown;
   els.assetCount.textContent =
     `${moduleLabels[state.activeTab]} ${assets.length} 个标的${breakdown ? ` · ${breakdown}` : ""}`;
 
@@ -351,35 +509,27 @@ function renderAssets() {
     container.appendChild(card);
   };
 
-  if (state.activeTab === "manager") {
-    assets.forEach((asset) => appendAsset(asset));
-    return;
-  }
-
-  categoryOrder.forEach((category) => {
-    const categoryAssets = assets.filter((asset) => asset.category === category);
-    if (!categoryAssets.length) return;
-    const sectionKey = `${state.activeTab}:${category}`;
+  const appendSection = (sectionKey, label, sectionAssets, className) => {
     const collapsed = !query && state.collapsedAssetSections.has(sectionKey);
     const section = document.createElement("section");
     section.className = `asset-section${collapsed ? " collapsed" : ""}`;
 
     const heading = document.createElement("button");
     heading.type = "button";
-    heading.className = `asset-section-title category-${category}`;
+    heading.className = `asset-section-title ${className}`;
     heading.setAttribute("aria-expanded", String(!collapsed));
     heading.innerHTML = `
       <span class="asset-section-label">
         <span class="collapse-chevron" aria-hidden="true"></span>
-        ${basketLabels[category]}
+        ${escapeHtml(label)}
       </span>
-      <strong>${categoryAssets.length}</strong>
+      <strong>${sectionAssets.length}</strong>
     `;
 
     const body = document.createElement("div");
     body.className = "asset-section-body";
     body.hidden = collapsed;
-    categoryAssets.forEach((asset) => appendAsset(asset, body));
+    sectionAssets.forEach((asset) => appendAsset(asset, body));
 
     heading.addEventListener("click", () => {
       const willCollapse = !section.classList.contains("collapsed");
@@ -394,6 +544,33 @@ function renderAssets() {
     });
     section.append(heading, body);
     els.assetList.appendChild(section);
+  };
+
+  if (state.activeTab === "manager") {
+    managerClusterOrder.forEach((cluster, index) => {
+      const clusterAssets = assets.filter(
+        (asset) => (asset.cluster || "未分类") === cluster,
+      );
+      if (!clusterAssets.length) return;
+      appendSection(
+        `manager:${cluster}`,
+        cluster,
+        clusterAssets,
+        `manager-cluster cluster-${index + 1}`,
+      );
+    });
+    return;
+  }
+
+  categoryOrder.forEach((category) => {
+    const categoryAssets = assets.filter((asset) => asset.category === category);
+    if (!categoryAssets.length) return;
+    appendSection(
+      `${state.activeTab}:${category}`,
+      basketLabels[category],
+      categoryAssets,
+      `category-${category}`,
+    );
   });
 }
 
@@ -494,6 +671,7 @@ function addToSpliceBasket(id, basket) {
 function currentConfig() {
   return {
     baskets: JSON.parse(JSON.stringify(state.baskets)),
+    benchmarkId: state.benchmarkId || state.defaultBenchmarkId,
     spliceSimulation: {
       enabled: els.spliceToggle.checked,
       baskets: JSON.parse(JSON.stringify(state.spliceBaskets)),
@@ -539,7 +717,7 @@ async function runBacktest() {
   try {
     const payload = currentConfig();
     const signature = JSON.stringify(payload);
-    const res = await fetch("/api/backtest", {
+    const res = await fetch(appUrl("api/backtest"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -854,6 +1032,8 @@ function addDays(dateText, days) {
 
 function renderResult(data) {
   els.results.classList.remove("hidden");
+  const benchmark = data.benchmark || {};
+  const benchmarkName = benchmark.name || "对照基准";
   const activeControls = Object.entries(data.ma20Controls || {})
     .filter(([, enabled]) => enabled)
     .map(([key]) => basketLabels[key])
@@ -863,7 +1043,13 @@ function renderResult(data) {
     : "";
   const stats = data.rebalanceStats || {};
   const rebalanceText = `策略调仓 ${stats.strategyTotal ?? 0} 次（Stage变化 ${stats.stageChanges ?? 0} 次，三个月再平衡 ${stats.threeMonth ?? 0} 次；分级风控动作 ${stats.riskActions ?? 0} 次）`;
-  els.windowText.textContent = `${data.window.start} 至 ${data.window.end}，共 ${data.window.days} 个交易日；${rebalanceText}；MA20 + KST 风控：${activeControls || "关闭"}${spliceText}。`;
+  const benchmarkCoverage = benchmark.partial
+    ? `局部对比 ${benchmark.comparisonStart} 至 ${benchmark.comparisonEnd}`
+    : `完整覆盖 ${benchmark.comparisonStart} 至 ${benchmark.comparisonEnd}`;
+  els.windowText.textContent = `${data.window.start} 至 ${data.window.end}，共 ${data.window.days} 个交易日；对照基准：${benchmarkName}（${benchmarkCoverage}）；${rebalanceText}；MA20 + KST 风控：${activeControls || "关闭"}${spliceText}。`;
+  els.navChartSubtitle.textContent = `策略 / 理论无风控 / ${benchmarkName}`;
+  els.annualReturnSubtitle.textContent = `策略 vs ${benchmarkName}`;
+  els.annualContributionSubtitle.textContent = `四类资产驱动力 vs ${benchmarkName}`;
   renderMetrics(data.metrics);
   renderCharts(data);
   renderTables(data);
@@ -899,10 +1085,11 @@ function metricCell(label, value) {
 }
 
 function renderCharts(data) {
+  const benchmarkName = data.benchmark?.name || "对照基准";
   drawLineChart("navChart", data.series, [
     { key: "strategy", label: "策略", color: colors.strategy },
     { key: "theory", label: "理论", color: colors.theory, dashed: true },
-    { key: "benchmark", label: "沪深300", color: colors.benchmark },
+    { key: "benchmark", label: benchmarkName, color: colors.benchmark },
   ]);
 
   drawLineChart(
@@ -924,7 +1111,7 @@ function renderCharts(data) {
 
   drawGroupedBarChart("annualReturnChart", data.annualAttribution, [
     { key: "strategy", label: "策略", color: colors.strategy },
-    { key: "benchmark", label: "沪深300", color: "#9aa5b1" },
+    { key: "benchmark", label: benchmarkName, color: "#9aa5b1" },
   ]);
 
   drawSignedStackedBarChart("annualContributionChart", data.annualAttribution, [
@@ -935,7 +1122,7 @@ function renderCharts(data) {
   ], {
     lineSeries: [
       { key: "strategy", label: "策略总收益", color: "#17202a" },
-      { key: "benchmark", label: "沪深300", color: "#9aa5b1" },
+      { key: "benchmark", label: benchmarkName, color: "#9aa5b1" },
     ],
   });
 
@@ -949,9 +1136,10 @@ function renderCharts(data) {
 
 function renderTables(data) {
   renderSelectedAttribution(data);
+  const benchmarkName = data.benchmark?.name || "对照基准";
 
   els.annualTable.innerHTML = table(
-    ["年份", "策略", "沪深300", "股票贡献", "商品贡献", "转债贡献", "纯债贡献"],
+    ["年份", "策略", benchmarkName, "股票贡献", "商品贡献", "转债贡献", "纯债贡献"],
     data.annualAttribution.map((row) => [
       row.year,
       pct(row.strategy),
@@ -1029,10 +1217,11 @@ function renderSelectedAttribution(data) {
     : "连续相同 Stage 合并；贡献点按每日真实持仓计算";
   renderStageAttribution(
     yearMode ? data.yearStageAttribution || [] : data.stageAttribution || [],
+    data.benchmark?.name || "对照基准",
   );
 }
 
-function renderStageAttribution(rows) {
+function renderStageAttribution(rows, benchmarkName) {
   if (!rows.length) {
     els.stageAttributionTable.innerHTML = `<div class="empty-state">暂无阶段归因数据</div>`;
     return;
@@ -1059,7 +1248,7 @@ function renderStageAttribution(rows) {
           <th rowspan="2">连续判断月数</th>
           <th rowspan="2">交易日</th>
           <th rowspan="2">策略实际收益</th>
-          <th rowspan="2">沪深300</th>
+          <th rowspan="2">${escapeHtml(benchmarkName)}</th>
           <th class="return-group-header" colspan="4">四类资产区间收益</th>
           <th class="contribution-group-header" colspan="4">实际贡献点</th>
           <th rowspan="2">策略调仓</th>
@@ -1325,7 +1514,8 @@ function drawGroupedBarChart(canvasId, rows, series) {
   rows.forEach((row, i) => {
     const center = pad.left + groupW * i + groupW / 2;
     series.forEach((s, j) => {
-      const value = Number(row[s.key]) || 0;
+      const value = row[s.key];
+      if (!Number.isFinite(value)) return;
       const x = center - (barW * series.length) / 2 + j * barW;
       const top = Math.min(y(value), zeroY);
       const h = Math.max(1, Math.abs(zeroY - y(value)));
@@ -1344,7 +1534,9 @@ function drawSignedStackedBarChart(canvasId, rows, series, options = {}) {
   const posTotals = rows.map((row) => series.reduce((sum, s) => sum + Math.max(0, Number(row[s.key]) || 0), 0));
   const negTotals = rows.map((row) => series.reduce((sum, s) => sum + Math.min(0, Number(row[s.key]) || 0), 0));
   const lineSeries = options.lineSeries || [];
-  const lineValues = lineSeries.flatMap((line) => rows.map((row) => Number(row[line.key]) || 0));
+  const lineValues = lineSeries.flatMap((line) =>
+    rows.map((row) => row[line.key]).filter(Number.isFinite),
+  );
   let minY = Math.min(0, ...negTotals, ...lineValues);
   let maxY = Math.max(0, ...posTotals, ...lineValues);
   const span = maxY - minY || 1;
@@ -1388,11 +1580,17 @@ function drawSignedStackedBarChart(canvasId, rows, series, options = {}) {
     ctx.lineWidth = 2;
     ctx.setLineDash(lineIndex === 0 ? [3, 4] : [8, 5]);
     ctx.beginPath();
+    let started = false;
     rows.forEach((row, i) => {
       const center = pad.left + groupW * i + groupW / 2;
-      const value = Number(row[line.key]) || 0;
-      if (i === 0) ctx.moveTo(center, y(value));
-      else ctx.lineTo(center, y(value));
+      const value = row[line.key];
+      if (!Number.isFinite(value)) return;
+      if (!started) {
+        ctx.moveTo(center, y(value));
+        started = true;
+      } else {
+        ctx.lineTo(center, y(value));
+      }
     });
     ctx.stroke();
     ctx.restore();
@@ -1608,7 +1806,7 @@ async function apiRequest(path, options = {}) {
     request.headers["Content-Type"] = "application/json";
     request.body = JSON.stringify(options.body);
   }
-  const response = await fetch(path, request);
+  const response = await fetch(appUrl(path), request);
   if (response.status === 204) return null;
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "操作失败");
@@ -1696,8 +1894,9 @@ function renderStrategyCard(strategy) {
     )).join("")
     : `<span class="strategy-tag empty">未设置标签</span>`;
   const missing = (strategy.missingAssets || []).length;
+  const missingBenchmark = Boolean(strategy.missingBenchmark);
   return `
-    <article class="strategy-card${missing ? " has-missing-assets" : ""}">
+    <article class="strategy-card${missing || missingBenchmark ? " has-missing-assets" : ""}">
       <header class="strategy-card-head">
         <div>
           <h3>${escapeHtml(strategy.name)}</h3>
@@ -1708,6 +1907,7 @@ function renderStrategyCard(strategy) {
       <div class="strategy-tags">${tags}</div>
       <p class="strategy-notes">${escapeHtml(strategy.notes || "暂无备注")}</p>
       ${missing ? `<p class="missing-warning">有 ${missing} 个标的已失效，暂时不能载入</p>` : ""}
+      ${missingBenchmark ? `<p class="missing-warning">对照基准 ${escapeHtml(strategy.missingBenchmark.id)} 已失效，暂时不能载入</p>` : ""}
       <div class="strategy-metrics">
         <div><span>回测区间</span><strong>${escapeHtml(windowInfo.start || "-")}<br>${escapeHtml(windowInfo.end || "-")}</strong></div>
         <div><span>累计收益</span><strong>${pct(summary.totalReturn)}</strong></div>
@@ -1814,6 +2014,11 @@ function loadStrategyIntoWorkspace(strategy) {
   }
 
   const config = strategy.config;
+  const benchmarkId = config.benchmarkId || state.defaultBenchmarkId;
+  if (!state.assetsById.has(benchmarkId)) {
+    window.alert(`对照基准已失效，策略未载入：\n${benchmarkId}`);
+    return false;
+  }
   const nextBaskets = {};
   const nextSpliceBaskets = {};
   categoryOrder.forEach((category) => {
@@ -1822,6 +2027,7 @@ function loadStrategyIntoWorkspace(strategy) {
   });
   state.baskets = nextBaskets;
   state.spliceBaskets = nextSpliceBaskets;
+  state.benchmarkId = benchmarkId;
   state.stageWeights = cloneWeights(config.stageWeights);
   state.stageWeightProfile = config.stageWeightProfile === "custom"
     ? detectStageWeightProfile(state.stageWeights)
@@ -1829,6 +2035,7 @@ function loadStrategyIntoWorkspace(strategy) {
   els.spliceToggle.checked = Boolean(config.spliceSimulation?.enabled);
   els.ma20Equity.checked = Boolean(config.ma20Controls?.equity);
   els.ma20Commodity.checked = Boolean(config.ma20Controls?.commodity);
+  renderBenchmarkControl();
   renderBaskets();
   renderSplicePool();
   els.startDate.value = config.dateRange?.start || "";

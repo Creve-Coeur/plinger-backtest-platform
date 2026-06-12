@@ -36,6 +36,8 @@ INDEX_DIR = ROOT_DIR / "指数"
 ENHANCED_DIR = ROOT_DIR / "增强"
 STRATEGY_DIR = ROOT_DIR / "策略代码"
 PRING_FILE_NAME = "普林格周期判断表_逐月_补全Stage7Stage8.xlsx"
+DEFAULT_BENCHMARK_ID = "index:000300.SH"
+APP_VERSION = "2026.06.12.3"
 
 CATEGORY_LABELS = {
     "equity": "股票",
@@ -441,8 +443,10 @@ class DataStore:
         ):
             groups.setdefault(meta.module, []).append(meta.__dict__)
         return {
+            "apiVersion": APP_VERSION,
             "groups": groups,
             "defaults": self.default_selection(),
+            "defaultBenchmarkId": DEFAULT_BENCHMARK_ID,
             "defaultStageWeights": default_stage_weights(),
             "stageWeightProfiles": stage_weight_profiles(),
             "pring": self.pring_summary(),
@@ -567,6 +571,13 @@ def metric(nav: pd.Series, name: str) -> dict[str, Any]:
         "sharpe": as_float(sharpe),
         "calmar": as_float(calmar),
     }
+
+
+def compounded_return(returns: pd.Series) -> float | None:
+    valid = returns.dropna()
+    if valid.empty:
+        return None
+    return as_float((1.0 + valid).prod() - 1.0)
 
 
 def unique_ids(ids: list[str]) -> list[str]:
@@ -1232,6 +1243,9 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         ma20_controls = {"equity": legacy_enabled, "commodity": legacy_enabled}
     ma20_enabled = any(ma20_controls.values())
     stage_weights = parse_stage_weights(payload.get("stageWeights"))
+    benchmark_id = str(payload.get("benchmarkId") or DEFAULT_BENCHMARK_ID)
+    if benchmark_id not in store.assets:
+        raise ValueError(f"对照基准不存在或尚未加载: {benchmark_id}")
 
     selected = {
         "equity": equity_ids,
@@ -1557,20 +1571,10 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     nav_strategy = pd.Series(strategy_nav_values, index=dates)
     nav_theory = pd.Series(theory_nav_values, index=dates)
 
-    benchmark_series = find_benchmark_series()
-    benchmark_prices = (
-        benchmark_series.reindex(prepared.raw_prices.index.union(all_dates))
-        .sort_index()
-        .ffill()
-        .reindex(all_dates)
-        .dropna()
+    nav_benchmark, benchmark_ret, benchmark_meta = build_benchmark_comparison(
+        benchmark_id,
+        dates,
     )
-    if len(benchmark_prices) == len(all_dates):
-        benchmark_ret = benchmark_prices.pct_change(fill_method=None).fillna(0.0).reindex(dates)
-        benchmark_ret.loc[dates[0]] = 0.0
-        nav_benchmark = (1 + benchmark_ret).cumprod()
-    else:
-        nav_benchmark = nav_theory * np.nan
 
     df_daily = pd.DataFrame(
         {
@@ -1579,7 +1583,7 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             "Cb": pd.Series(contribution_history["convertible"], index=dates),
             "Cdb": pd.Series(contribution_history["pure_bond"], index=dates),
             "Strat": strategy_ret,
-            "Benchmark": nav_benchmark.pct_change().fillna(0),
+            "Benchmark": benchmark_ret,
         }
     )
     df_daily["Prev_NAV"] = nav_strategy.shift(1).fillna(1.0)
@@ -1668,8 +1672,9 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         "metrics": [
             metric(nav_strategy, "策略实盘版"),
             metric(nav_theory, "理论无风控"),
-            metric(nav_benchmark.dropna(), "沪深300基准") if nav_benchmark.notna().any() else None,
+            metric(nav_benchmark.dropna(), f"{benchmark_meta['name']}基准"),
         ],
+        "benchmark": benchmark_meta,
         "series": rows,
         "tradeLogs": trade_logs,
         "rebalanceStats": {
@@ -1692,12 +1697,52 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def find_benchmark_series() -> pd.Series:
-    for asset_id in ("fund:510300.SH", "index:000300.SH"):
-        if asset_id in store.assets:
-            return store.assets[asset_id].rename("benchmark")
-    first_asset = next(iter(store.assets.values()))
-    return first_asset.rename("benchmark")
+def build_benchmark_comparison(
+    benchmark_id: str,
+    dates: pd.DatetimeIndex,
+) -> tuple[pd.Series, pd.Series, dict[str, Any]]:
+    source = store.assets[benchmark_id]
+    meta = store.meta[benchmark_id]
+    eligible_dates = dates[
+        (dates >= pd.Timestamp(source.index.min()))
+        & (dates <= pd.Timestamp(source.index.max()))
+    ]
+    if eligible_dates.empty:
+        raise ValueError(
+            f"对照基准“{meta.name}”与当前回测区间没有重叠数据"
+        )
+
+    prices = (
+        source.reindex(source.index.union(eligible_dates))
+        .sort_index()
+        .ffill()
+        .reindex(eligible_dates)
+        .dropna()
+    )
+    if len(prices) < 2:
+        raise ValueError(
+            f"对照基准“{meta.name}”与当前回测区间的重叠数据不足 2 个交易日"
+        )
+
+    comparison_nav = prices / float(prices.iloc[0])
+    nav = pd.Series(np.nan, index=dates, dtype=float)
+    nav.loc[comparison_nav.index] = comparison_nav.values
+    daily_returns = nav.pct_change(fill_method=None)
+    daily_returns.loc[comparison_nav.index[0]] = 0.0
+
+    comparison_start = pd.Timestamp(comparison_nav.index[0])
+    comparison_end = pd.Timestamp(comparison_nav.index[-1])
+    benchmark_meta = {
+        **meta.__dict__,
+        "comparisonStart": comparison_start.strftime("%Y-%m-%d"),
+        "comparisonEnd": comparison_end.strftime("%Y-%m-%d"),
+        "comparisonDays": int(len(comparison_nav)),
+        "partial": bool(
+            comparison_start > pd.Timestamp(dates[0])
+            or comparison_end < pd.Timestamp(dates[-1])
+        ),
+    }
+    return nav, daily_returns, benchmark_meta
 
 
 def build_annual_attribution(df_daily: pd.DataFrame) -> list[dict[str, Any]]:
@@ -1708,7 +1753,7 @@ def build_annual_attribution(df_daily: pd.DataFrame) -> list[dict[str, Any]]:
             {
                 "year": str(year),
                 "strategy": as_float((1 + group["Strat"]).prod() - 1),
-                "benchmark": as_float((1 + group["Benchmark"]).prod() - 1),
+                "benchmark": compounded_return(group["Benchmark"]),
                 "equity": as_float((group["Eq"] * group["Prev_NAV"]).sum() / start_nav),
                 "commodity": as_float((group["Com"] * group["Prev_NAV"]).sum() / start_nav),
                 "convertible": as_float((group["Cb"] * group["Prev_NAV"]).sum() / start_nav),
@@ -1804,7 +1849,7 @@ def build_stage_attribution(
             "consecutiveMonths": consecutive_months,
             "tradingDays": int(len(segment_dates)),
             "strategyReturn": as_float((1.0 + segment_daily["Strat"]).prod() - 1.0),
-            "benchmarkReturn": as_float((1.0 + segment_daily["Benchmark"]).prod() - 1.0),
+            "benchmarkReturn": compounded_return(segment_daily["Benchmark"]),
             "stageChanges": stage_changes,
             "threeMonthRebalances": three_month,
             "strategyRebalances": stage_changes + three_month,
@@ -2111,6 +2156,7 @@ class StrategyStore:
             profile = requested_profile
         return {
             "baskets": baskets,
+            "benchmarkId": str(raw.get("benchmarkId") or DEFAULT_BENCHMARK_ID),
             "spliceSimulation": {
                 "enabled": bool(splice_payload.get("enabled")),
                 "baskets": splice_baskets,
@@ -2166,6 +2212,9 @@ class StrategyStore:
             )
         if missing:
             raise ApiError(f"以下资产已失效：{', '.join(missing)}")
+        benchmark_id = config.get("benchmarkId") or DEFAULT_BENCHMARK_ID
+        if benchmark_id not in store.meta:
+            raise ApiError(f"对照基准已失效：{benchmark_id}")
         return snapshots
 
     def _summary(self, result: dict[str, Any]) -> dict[str, Any]:
@@ -2214,9 +2263,16 @@ class StrategyStore:
         store.ensure_loaded()
         serialized_strategies: list[dict[str, Any]] = []
         for strategy in data["strategies"]:
+            serialized_strategy = deepcopy(strategy)
+            serialized_strategy.setdefault("config", {})
+            benchmark_id = str(
+                serialized_strategy["config"].get("benchmarkId")
+                or DEFAULT_BENCHMARK_ID
+            )
+            serialized_strategy["config"]["benchmarkId"] = benchmark_id
             missing_ids = [
                 asset_id
-                for asset_id in self._asset_ids(strategy["config"])
+                for asset_id in self._asset_ids(serialized_strategy["config"])
                 if asset_id not in store.meta
             ]
             snapshot_map = {
@@ -2245,10 +2301,15 @@ class StrategyStore:
                 )
             serialized_strategies.append(
                 {
-                    **deepcopy(strategy),
+                    **serialized_strategy,
                     "tagPaths": tag_paths,
                     "missingAssets": missing_assets,
-                    "assetCount": len(self._asset_ids(strategy["config"])),
+                    "missingBenchmark": (
+                        None
+                        if benchmark_id in store.meta
+                        else {"id": benchmark_id}
+                    ),
+                    "assetCount": len(self._asset_ids(serialized_strategy["config"])),
                 }
             )
         serialized_strategies.sort(key=lambda item: item["updatedAt"], reverse=True)
@@ -2544,6 +2605,17 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/assets":
             self.send_json(store.grouped_assets())
+            return
+        if parsed.path == "/api/health":
+            store.ensure_loaded()
+            self.send_json(
+                {
+                    "status": "ok",
+                    "apiVersion": APP_VERSION,
+                    "assets": len(store.assets),
+                    "schemaVersion": strategy_store.SCHEMA_VERSION,
+                }
+            )
             return
         if parsed.path == "/api/strategies":
             self.handle_api(lambda: strategy_store.list_all())

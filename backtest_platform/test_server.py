@@ -78,10 +78,22 @@ class PringStageTests(unittest.TestCase):
             {meta.cluster for meta in manager_assets},
             {"防守压仓", "核心稳健", "进攻弹性"},
         )
+        self.assertEqual(
+            {
+                cluster: sum(meta.cluster == cluster for meta in manager_assets)
+                for cluster in ("进攻弹性", "核心稳健", "防守压仓")
+            },
+            {"进攻弹性": 29, "核心稳健": 19, "防守压仓": 4},
+        )
         sample = server.store.meta["manager:008134.OF"]
         self.assertEqual(sample.manager, "伍旋")
         self.assertEqual(sample.roleLabel, "极致防守·压舱石")
         self.assertIn("近全周期有效", sample.fullLabel)
+
+    def test_asset_payload_exposes_default_benchmark(self) -> None:
+        payload = server.store.grouped_assets()
+        self.assertEqual(payload["apiVersion"], server.APP_VERSION)
+        self.assertEqual(payload["defaultBenchmarkId"], "index:000300.SH")
 
     def test_stage_target_mapping(self) -> None:
         expected = {
@@ -425,6 +437,126 @@ class BacktestIntegrationTests(unittest.TestCase):
         stats = result["rebalanceStats"]
         self.assertEqual(stats["strategyTotal"], stats["stageChanges"] + stats["threeMonth"])
 
+    def test_default_benchmark_uses_hs300_index(self) -> None:
+        result = server.run_backtest(
+            {
+                "baskets": server.store.default_selection(),
+                "spliceSimulation": {"enabled": False, "baskets": {}},
+                "ma20Controls": {"equity": False, "commodity": False},
+            }
+        )
+        self.assertEqual(result["benchmark"]["id"], server.DEFAULT_BENCHMARK_ID)
+        self.assertEqual(result["benchmark"]["name"], "沪深300")
+        self.assertFalse(result["benchmark"]["partial"])
+        self.assertEqual(result["metrics"][2]["name"], "沪深300基准")
+
+    def test_switching_benchmark_only_changes_benchmark_results(self) -> None:
+        base = {
+            "baskets": server.store.default_selection(),
+            "spliceSimulation": {"enabled": False, "baskets": {}},
+            "ma20Controls": {"equity": False, "commodity": False},
+            "dateRange": {"start": "2020-01-01", "end": "2024-12-31"},
+        }
+        hs300 = server.run_backtest(
+            {**base, "benchmarkId": "index:000300.SH"}
+        )
+        star50 = server.run_backtest(
+            {**base, "benchmarkId": "index:000688.SH"}
+        )
+
+        self.assertEqual(
+            [row["strategy"] for row in hs300["series"]],
+            [row["strategy"] for row in star50["series"]],
+        )
+        self.assertNotEqual(
+            hs300["series"][-1]["benchmark"],
+            star50["series"][-1]["benchmark"],
+        )
+        self.assertNotEqual(
+            hs300["annualAttribution"][-1]["benchmark"],
+            star50["annualAttribution"][-1]["benchmark"],
+        )
+        self.assertNotEqual(
+            hs300["stageAttribution"][-1]["benchmarkReturn"],
+            star50["stageAttribution"][-1]["benchmarkReturn"],
+        )
+
+    def test_partial_benchmark_keeps_strategy_window_and_nulls_uncovered_periods(self) -> None:
+        result = server.run_backtest(
+            {
+                "baskets": server.store.default_selection(),
+                "benchmarkId": "index:000688.SH",
+                "spliceSimulation": {"enabled": False, "baskets": {}},
+                "ma20Controls": {"equity": False, "commodity": False},
+            }
+        )
+        self.assertEqual(result["window"]["start"], "2016-04-01")
+        self.assertTrue(result["benchmark"]["partial"])
+        self.assertEqual(result["benchmark"]["comparisonStart"], "2019-12-31")
+        self.assertIsNone(result["series"][0]["benchmark"])
+        first_comparison = next(
+            row for row in result["series"] if row["benchmark"] is not None
+        )
+        self.assertEqual(first_comparison["benchmark"], 1.0)
+        self.assertTrue(
+            all(
+                row["benchmark"] is None
+                for row in result["annualAttribution"]
+                if row["year"] in {"2016", "2017", "2018"}
+            )
+        )
+        self.assertTrue(
+            any(row["benchmarkReturn"] is None for row in result["stageAttribution"])
+        )
+
+    def test_unknown_or_non_overlapping_benchmark_is_rejected(self) -> None:
+        base = {
+            "baskets": server.store.default_selection(),
+            "spliceSimulation": {"enabled": False, "baskets": {}},
+            "ma20Controls": {"equity": False, "commodity": False},
+        }
+        with self.assertRaisesRegex(ValueError, "对照基准不存在"):
+            server.run_backtest({**base, "benchmarkId": "index:UNKNOWN.TEST"})
+        with self.assertRaisesRegex(ValueError, "没有重叠数据"):
+            server.run_backtest(
+                {
+                    **base,
+                    "benchmarkId": "index:000688.SH",
+                    "dateRange": {"start": "2016-04-01", "end": "2017-12-31"},
+                }
+            )
+
+    def test_benchmark_with_only_one_overlapping_day_is_rejected(self) -> None:
+        asset_id = "index:ONE.DAY"
+        series = pd.Series(
+            [1.0],
+            index=pd.DatetimeIndex([pd.Timestamp("2024-01-02")]),
+        )
+        meta = server.AssetMeta(
+            id=asset_id,
+            code="ONE.DAY",
+            name="单日基准",
+            module="index",
+            start="2024-01-02",
+            end="2024-01-02",
+            count=1,
+            category="equity",
+        )
+        with (
+            patch.dict(server.store.assets, {asset_id: series}),
+            patch.dict(server.store.meta, {asset_id: meta}),
+            self.assertRaisesRegex(ValueError, "不足 2 个交易日"),
+        ):
+            server.run_backtest(
+                {
+                    "baskets": server.store.default_selection(),
+                    "benchmarkId": asset_id,
+                    "spliceSimulation": {"enabled": False, "baskets": {}},
+                    "ma20Controls": {"equity": False, "commodity": False},
+                    "dateRange": {"start": "2024-01-01", "end": "2024-03-31"},
+                }
+            )
+
     def test_splice_switch_preserves_accounting(self) -> None:
         result = server.run_backtest(
             {
@@ -725,6 +857,36 @@ class StrategyStoreTests(unittest.TestCase):
             [item["name"] for item in restarted.list_all()["strategies"]],
             ["更新后的策略"],
         )
+
+    def test_strategy_config_defaults_and_persists_benchmark(self) -> None:
+        defaulted = self.create_strategy("默认基准策略")
+        self.assertEqual(
+            defaulted["config"]["benchmarkId"],
+            server.DEFAULT_BENCHMARK_ID,
+        )
+
+        self.config["benchmarkId"] = "index:000688.SH"
+        custom = self.create_strategy("自定义基准策略")
+        self.assertEqual(custom["config"]["benchmarkId"], "index:000688.SH")
+        duplicated = self.strategy_store.duplicate_strategy(custom["id"], {})
+        self.assertEqual(
+            duplicated["config"]["benchmarkId"],
+            "index:000688.SH",
+        )
+
+    def test_missing_benchmark_is_reported_without_counting_as_investment_asset(self) -> None:
+        strategy = self.create_strategy("失效基准策略")
+        original_count = strategy["assetCount"]
+        data = self.strategy_store._read_unlocked()
+        data["strategies"][0]["config"]["benchmarkId"] = "index:MISSING.BENCHMARK"
+        self.strategy_store._write_unlocked(data)
+
+        loaded = self.strategy_store.list_all()["strategies"][0]
+        self.assertEqual(
+            loaded["missingBenchmark"]["id"],
+            "index:MISSING.BENCHMARK",
+        )
+        self.assertEqual(loaded["assetCount"], original_count)
 
     def test_three_level_tags_selection_and_parent_filter_paths(self) -> None:
         root = self.strategy_store.create_tag({"name": "风格"})

@@ -1,4 +1,5 @@
 :root {
+  --topbar-height: 148px;
   --bg: #f4f6f8;
   --panel: #ffffff;
   --text: #17202a;
@@ -39,14 +40,20 @@ input {
   position: sticky;
   top: 0;
   z-index: 20;
+  display: block;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.94);
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(10px);
+}
+
+.topbar-main {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 18px 28px;
-  background: rgba(255, 255, 255, 0.94);
-  border-bottom: 1px solid var(--line);
-  backdrop-filter: blur(10px);
+  min-height: 78px;
+  padding: 14px 28px;
 }
 
 .eyebrow {
@@ -79,14 +86,104 @@ h3 {
 
 .top-actions {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
   flex-wrap: wrap;
+}
+
+.settings-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 28px;
+  border-top: 1px solid var(--line);
+  background: #eef2f5;
+}
+
+.settings-heading {
+  min-width: 116px;
+}
+
+.settings-heading span,
+.settings-heading small {
+  display: block;
+}
+
+.settings-heading span {
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.settings-heading small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.benchmark-control {
+  display: flex;
+  min-width: 280px;
+  align-items: center;
+  gap: 9px;
+}
+
+.benchmark-btn {
+  min-width: 205px;
+  min-height: 48px;
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  padding: 6px 12px;
+  border: 1px solid #b8cad7;
+  border-radius: 7px;
+  background: white;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.benchmark-btn::after {
+  content: "更换";
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.benchmark-btn span,
+.benchmark-btn small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.benchmark-btn span {
+  font-weight: 800;
+}
+
+.benchmark-btn small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.benchmark-btn:hover {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(47, 111, 159, 0.1);
+}
+
+.benchmark-btn.missing {
+  border-color: #dfa0a0;
+  color: var(--red);
 }
 
 .stage-control-stack {
   display: grid;
-  width: 210px;
+  width: 220px;
   gap: 5px;
 }
 
@@ -346,9 +443,9 @@ h3 {
 
 .library-panel {
   position: sticky;
-  top: 120px;
+  top: calc(var(--topbar-height) + 20px);
   align-self: start;
-  height: calc(100vh - 140px);
+  height: calc(100vh - var(--topbar-height) - 40px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -490,6 +587,28 @@ h3 {
 
 .asset-section-title strong {
   font-size: 11px;
+}
+
+.asset-section-title.manager-cluster {
+  border-left-color: #607d8b;
+}
+
+.asset-section-title.manager-cluster.cluster-1 {
+  border-left-color: var(--red);
+  background: #fbf1f1;
+  color: #913838;
+}
+
+.asset-section-title.manager-cluster.cluster-2 {
+  border-left-color: var(--blue);
+  background: #eef5f9;
+  color: #315f7d;
+}
+
+.asset-section-title.manager-cluster.cluster-3 {
+  border-left-color: var(--green);
+  background: #eef7f2;
+  color: #32664d;
 }
 
 .asset-section-body[hidden] {
@@ -925,6 +1044,93 @@ h3 {
   box-shadow: 0 24px 70px rgba(23, 32, 42, 0.24);
 }
 
+.benchmark-modal-dialog {
+  width: min(820px, 100%);
+}
+
+.benchmark-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 170px;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  background: #f8fafc;
+}
+
+.benchmark-toolbar .search {
+  width: 100%;
+  margin: 0;
+}
+
+.benchmark-list {
+  min-height: 260px;
+  max-height: min(560px, calc(100vh - 210px));
+  padding: 10px 16px 16px;
+  overflow: auto;
+}
+
+.benchmark-option {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 11px 12px;
+  border: 1px solid transparent;
+  border-bottom-color: #e7edf1;
+  background: white;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.benchmark-option:hover {
+  border-color: #b8cad7;
+  border-radius: 6px;
+  background: #f4f8fb;
+}
+
+.benchmark-option.selected {
+  border-color: #8fb8d2;
+  border-radius: 6px;
+  background: #eaf3f8;
+}
+
+.benchmark-option-main,
+.benchmark-option-meta {
+  min-width: 0;
+}
+
+.benchmark-option-main strong,
+.benchmark-option-main small,
+.benchmark-option-meta span,
+.benchmark-option-meta small {
+  display: block;
+}
+
+.benchmark-option-main strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.benchmark-option-main small,
+.benchmark-option-meta small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.benchmark-option-meta {
+  text-align: right;
+}
+
+.benchmark-option-meta span {
+  color: #3f6076;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .modal-head,
 .modal-actions {
   display: flex;
@@ -1082,6 +1288,7 @@ h3 {
 
 canvas {
   width: 100%;
+  max-width: 100%;
   display: block;
 }
 
@@ -1543,6 +1750,11 @@ textarea.text-control {
   background: #f8fafc;
 }
 
+.settings-bar .control-group {
+  min-height: 48px;
+  margin-left: auto;
+}
+
 .strategy-metrics span,
 .strategy-metrics strong {
   display: block;
@@ -1747,6 +1959,19 @@ textarea.text-control {
 }
 
 @media (max-width: 1180px) {
+  .settings-bar {
+    flex-wrap: wrap;
+  }
+
+  .settings-bar .control-group {
+    margin-left: 0;
+  }
+
+  .library-panel {
+    position: static;
+    height: 540px;
+  }
+
   .shell {
     grid-template-columns: 300px minmax(0, 1fr);
   }
@@ -1765,10 +1990,24 @@ textarea.text-control {
 }
 
 @media (max-width: 860px) {
-  .topbar {
-    position: static;
-    align-items: flex-start;
-    flex-direction: column;
+  .topbar-main {
+    gap: 14px;
+    padding: 12px 14px;
+  }
+
+  .settings-bar {
+    align-items: stretch;
+    padding: 12px 14px;
+  }
+
+  .settings-heading {
+    flex: 0 0 116px;
+  }
+
+  .benchmark-control,
+  .settings-bar .control-group,
+  .stage-control-stack {
+    flex: 1 1 280px;
   }
 
   .shell {
@@ -1816,6 +2055,11 @@ textarea.text-control {
 }
 
 @media (max-width: 560px) {
+  .topbar-main {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .top-actions,
   .basket-grid {
     grid-template-columns: 1fr;
@@ -1824,6 +2068,17 @@ textarea.text-control {
 
   .top-actions {
     display: grid;
+  }
+
+  .settings-bar {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .benchmark-control {
+    width: 100%;
+    display: grid;
+    align-items: stretch;
   }
 
   .stage-control-stack {
@@ -1859,6 +2114,19 @@ textarea.text-control {
 
   .modal-dialog {
     max-height: calc(100vh - 20px);
+  }
+
+  .benchmark-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .benchmark-option {
+    grid-template-columns: 1fr;
+    gap: 7px;
+  }
+
+  .benchmark-option-meta {
+    text-align: left;
   }
 
   .stage-weight-wrap {

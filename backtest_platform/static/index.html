@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>底层资产回测平台</title>
-    <link rel="stylesheet" href="styles.css?v=20260612-4" />
+    <link rel="stylesheet" href="styles.css?v=20260612-5" />
   </head>
   <body>
     <header class="topbar">
@@ -282,9 +282,7 @@
       </section>
       <section class="strategy-toolbar">
         <input id="strategySearchInput" class="search" type="search" placeholder="搜索策略名、标签或备注" />
-        <select id="strategyTagFilter" class="select-control">
-          <option value="">全部标签</option>
-        </select>
+        <div id="strategyTagFilter" class="strategy-filter-tree" aria-label="按标签筛选策略"></div>
       </section>
       <section id="strategyCards" class="strategy-card-grid"></section>
     </main>
@@ -391,6 +389,6 @@
       </section>
     </div>
 
-    <script src="app.js?v=20260612-4"></script>
+    <script src="app.js?v=20260612-5"></script>
   </body>
 </html>

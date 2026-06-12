@@ -1608,7 +1608,10 @@ tr:last-child td {
 }
 
 .strategy-toolbar {
-  justify-content: flex-start;
+  display: grid;
+  align-items: stretch;
+  justify-content: stretch;
+  gap: 12px;
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1616,7 +1619,7 @@ tr:last-child td {
 }
 
 .strategy-toolbar .search {
-  flex: 1 1 420px;
+  width: 100%;
   margin: 0;
 }
 
@@ -1632,8 +1635,87 @@ tr:last-child td {
   outline: none;
 }
 
-.strategy-toolbar .select-control {
-  width: min(360px, 40%);
+.strategy-filter-tree {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.strategy-filter-row {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #e8edf1;
+}
+
+.strategy-filter-level {
+  padding: 7px 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.strategy-filter-options {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.strategy-filter-chip {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px;
+  border: 1px solid #d4dee6;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #40566b;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.strategy-filter-chip small {
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #e8eef3;
+  color: #607080;
+  font-size: 11px;
+  text-align: center;
+}
+
+.strategy-filter-chip:hover {
+  border-color: #91b2c8;
+  background: #eef5f9;
+}
+
+.strategy-filter-chip.active {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: white;
+}
+
+.strategy-filter-chip.active small {
+  background: rgba(255, 255, 255, 0.22);
+  color: white;
+}
+
+.strategy-filter-chip.reset {
+  color: var(--blue);
+}
+
+.strategy-filter-chip.reset.active {
+  color: white;
+}
+
+.strategy-filter-chip.inactive {
+  border-style: dashed;
+  opacity: 0.58;
 }
 
 .select-control:focus,
@@ -2149,8 +2231,13 @@ textarea.text-control {
     flex-direction: column;
   }
 
-  .strategy-toolbar .select-control {
-    width: 100%;
+  .strategy-filter-row {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .strategy-filter-level {
+    padding-bottom: 2px;
   }
 
   .strategy-metrics {

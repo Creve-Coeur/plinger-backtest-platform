@@ -33,6 +33,7 @@ const colors = {
 
 const categoryOrder = ["equity", "commodity", "convertible", "pure_bond"];
 const managerClusterOrder = ["进攻弹性", "核心稳健", "防守压仓", "未分类"];
+const strategyRootTagOrder = ["基准中枢", "基金经理路径", "宽基增强路径"];
 const stageNumbers = [1, 2, 3, 4, 5, 6, 7, 8];
 const fallbackBenchmarkId = "index:000300.SH";
 const expectedApiVersion = "2026.06.12.3";
@@ -77,6 +78,7 @@ const state = {
   strategyModalMode: "save",
   editingStrategyId: null,
   selectedStrategyTagIds: new Set(),
+  strategyFilterTagId: null,
 };
 
 const els = {
@@ -1781,7 +1783,7 @@ function wireStrategyEvents() {
   els.submitStrategyBtn.addEventListener("click", () => submitStrategy(false));
   els.saveAsStrategyBtn.addEventListener("click", () => submitStrategy(true));
   els.strategySearchInput.addEventListener("input", renderStrategyCards);
-  els.strategyTagFilter.addEventListener("change", renderStrategyCards);
+  els.strategyTagFilter.addEventListener("click", handleStrategyTagFilter);
   els.strategyCards.addEventListener("click", handleStrategyCardAction);
   els.tagManagerBtn.addEventListener("click", openTagManager);
   els.closeTagManagerBtn.addEventListener("click", closeTagManager);
@@ -1818,6 +1820,12 @@ async function loadStrategyLibrary() {
   state.strategies = data.strategies || [];
   state.tags = data.tags || [];
   if (
+    state.strategyFilterTagId
+    && !state.tags.some((tag) => tag.id === state.strategyFilterTagId)
+  ) {
+    state.strategyFilterTagId = null;
+  }
+  if (
     state.activeStrategyId
     && !state.strategies.some((strategy) => strategy.id === state.activeStrategyId)
   ) {
@@ -1845,23 +1853,126 @@ function handleRoute() {
 }
 
 function renderStrategyTagFilter() {
-  const current = els.strategyTagFilter.value;
-  const options = state.tags
-    .slice()
-    .sort((a, b) => a.path.localeCompare(b.path, "zh-CN"))
-    .map((tag) => (
-      `<option value="${tag.id}">${escapeHtml(tag.path)}${tag.active ? "" : "（已停用）"}</option>`
-    ))
-    .join("");
-  els.strategyTagFilter.innerHTML = `<option value="">全部标签</option>${options}`;
-  if (state.tags.some((tag) => tag.id === current)) {
-    els.strategyTagFilter.value = current;
+  const selected = state.tags.find((tag) => tag.id === state.strategyFilterTagId);
+  const selectedPathIds = selected?.pathIds || [];
+  const tagsByParent = new Map();
+  state.tags.forEach((tag) => {
+    const parentId = tag.parentId || "";
+    if (!tagsByParent.has(parentId)) tagsByParent.set(parentId, []);
+    tagsByParent.get(parentId).push(tag);
+  });
+  tagsByParent.forEach((tags, parentId) => {
+    tags.sort((left, right) => {
+      const leftRootOrder = strategyRootTagOrder.indexOf(left.name);
+      const rightRootOrder = strategyRootTagOrder.indexOf(right.name);
+      const rootOrder = parentId === ""
+        ? (leftRootOrder < 0 ? strategyRootTagOrder.length : leftRootOrder)
+          - (rightRootOrder < 0 ? strategyRootTagOrder.length : rightRootOrder)
+        : 0;
+      return (
+        rootOrder
+        || left.name.localeCompare(right.name, "zh-CN")
+        || left.id.localeCompare(right.id)
+      );
+    });
+  });
+
+  const rows = [];
+  const roots = tagsByParent.get("") || [];
+  rows.push(renderStrategyFilterRow({
+    depth: 1,
+    label: "一级标签",
+    tags: roots,
+    resetLabel: "全部策略",
+    resetTagId: "",
+    resetActive: !state.strategyFilterTagId,
+    selectedPathIds,
+  }));
+
+  const rootId = selectedPathIds[0];
+  const secondLevel = rootId ? (tagsByParent.get(rootId) || []) : [];
+  if (secondLevel.length) {
+    rows.push(renderStrategyFilterRow({
+      depth: 2,
+      label: "二级标签",
+      tags: secondLevel,
+      resetLabel: "全部",
+      resetTagId: rootId,
+      resetActive: state.strategyFilterTagId === rootId,
+      selectedPathIds,
+    }));
   }
+
+  const secondLevelId = selectedPathIds[1];
+  const thirdLevel = secondLevelId ? (tagsByParent.get(secondLevelId) || []) : [];
+  if (thirdLevel.length) {
+    rows.push(renderStrategyFilterRow({
+      depth: 3,
+      label: "三级标签",
+      tags: thirdLevel,
+      resetLabel: "全部",
+      resetTagId: secondLevelId,
+      resetActive: state.strategyFilterTagId === secondLevelId,
+      selectedPathIds,
+    }));
+  }
+  els.strategyTagFilter.innerHTML = rows.join("");
+}
+
+function renderStrategyFilterRow({
+  depth,
+  label,
+  tags,
+  resetLabel,
+  resetTagId,
+  resetActive,
+  selectedPathIds,
+}) {
+  const buttons = [
+    `
+      <button
+        class="strategy-filter-chip reset${resetActive ? " active" : ""}"
+        type="button"
+        data-strategy-filter-tag-id="${escapeHtml(resetTagId)}"
+      >${escapeHtml(resetLabel)}</button>
+    `,
+    ...tags.map((tag) => `
+      <button
+        class="strategy-filter-chip${selectedPathIds.includes(tag.id) ? " active" : ""}${tag.active ? "" : " inactive"}"
+        type="button"
+        data-strategy-filter-tag-id="${escapeHtml(tag.id)}"
+        title="${escapeHtml(tag.path)}${tag.active ? "" : "（已停用）"}"
+      >
+        <span>${escapeHtml(tag.name)}</span>
+        <small>${countStrategiesForTag(tag.id)}</small>
+      </button>
+    `),
+  ].join("");
+  return `
+    <div class="strategy-filter-row depth-${depth}">
+      <span class="strategy-filter-level">${label}</span>
+      <div class="strategy-filter-options">${buttons}</div>
+    </div>
+  `;
+}
+
+function countStrategiesForTag(tagId) {
+  return state.strategies.filter((strategy) => (
+    (strategy.tagPaths || []).some((item) => item.pathIds.includes(tagId))
+  )).length;
+}
+
+function handleStrategyTagFilter(event) {
+  const button = event.target.closest("[data-strategy-filter-tag-id]");
+  if (!button) return;
+  state.strategyFilterTagId = button.dataset.strategyFilterTagId || null;
+  renderStrategyTagFilter();
+  renderStrategyCards();
 }
 
 function renderStrategyCards() {
   const query = els.strategySearchInput.value.trim().toLowerCase();
-  const tagId = els.strategyTagFilter.value;
+  const tagId = state.strategyFilterTagId;
   const filtered = state.strategies.filter((strategy) => {
     const tagText = (strategy.tagPaths || []).map((item) => item.path).join(" ");
     const haystack = `${strategy.name} ${strategy.notes || ""} ${tagText}`.toLowerCase();
